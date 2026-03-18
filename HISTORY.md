@@ -152,3 +152,52 @@ Rules:
   - `BoundaryCondition::applyVelocity/applyPressure` still STUB — needed before SIMPLE loop.
   - SIMPLE loop (NavierStokesSolver) deferred to Milestone 3 physics scope.
   - Lid-driven cavity validation (Ghia et al. 1982) deferred to Milestone 4.
+
+## 2026-03-18 (Europe/Warsaw) - Phase 4 Boundary Conditions + Case Mapping
+- Author: Claude Code
+- Status: local-uncommitted
+- Metadata correction: Phase 2 (Mesh Geometry Core) was committed as `6136e80`; the
+  Phase 2 HISTORY entry incorrectly listed status as "local-uncommitted".
+- Summary:
+  - Implemented `BoundaryCondition::applyVelocity`: Dirichlet assignment for WALL/INLET
+    patches; zero-gradient (no-op) for OUTLET/SYMMETRY. Patches applied in order
+    left → right → bottom → top so top wins at top-row corners (lid-driven cavity
+    convention). Mesh consistency guard throws `std::invalid_argument` on pointer mismatch.
+  - Implemented `BoundaryCondition::applyPressure`: OUTLET sets boundary cell to 0.0;
+    INLET/WALL/SYMMETRY use zero-gradient (no-op). Same application order and guard.
+  - Added `buildBoundaryConditions()` free function (anonymous namespace) in
+    `NavierStokesSolver.cpp` to parse `bc.<side>.type/value/value_x/value_y` config keys
+    (case-insensitive type parsing; throws `std::invalid_argument` on unknown type).
+    Called from constructor; result stored in `m_bc`.
+  - Updated `NavierStokesSolver::initialize()` to call `m_bc.applyVelocity` and
+    `m_bc.applyPressure` after zero-allocating fields, setting correct initial boundary
+    values before the first SIMPLE step.
+  - Replaced all placeholder assertions in `test_bc.cpp` with numeric checks;
+    added 4 new tests: `ApplyVelocity_Outlet_LeavesFieldUnchanged`,
+    `ApplyVelocity_MeshMismatch_Throws`, `ApplyPressure_Wall_LeavesFieldUnchanged`,
+    `ApplyPressure_MeshMismatch_Throws`.
+  - Added 2 solver-level BC wiring tests in `test_solver_init.cpp`:
+    `BCWiring_TopLid_SetsTopRow` (verifies config value propagates to field after
+    initialize()) and `BCWiring_InvalidType_Throws` (unknown type → constructor throws).
+  - Test count grew from 91 to 97; all 97 pass.
+- Files changed:
+  - `src/core/BoundaryCondition.cpp`
+  - `src/solver/NavierStokesSolver.cpp`
+  - `tests/test_bc.cpp`
+  - `tests/test_solver_init.cpp`
+- Validation:
+  - `C:\Program Files\CMake\bin\cmake.exe --build build --config Debug`
+  - Build succeeded (`flowcore_lib`, `lgflow`, `lgflow_tests`), zero warnings, zero errors.
+  - `C:\Program Files\CMake\bin\ctest.exe --test-dir build -C Debug --output-on-failure`
+  - Result: 97/97 tests passed (3.64 s).
+- Risks/TODOs:
+  - `BoundaryCondition` operates on boundary-cell values (cell-centred FVM ghost-cell
+    approach). When the SIMPLE loop is live, face-flux overrides may be needed for
+    strict mass conservation at INLET/OUTLET faces.
+  - SYMMETRY BC velocity logic (zero normal component only) is currently a no-op; a
+    correct SYMMETRY implementation requires knowing which normal component to zero,
+    which is patch-geometry information not yet exposed in the interface.
+  - `PressureSolver::solve()` and `NavierStokesSolver::step()` remain STUB — Milestone 3
+    SIMPLE loop scope.
+  - `VTKWriter::write()` still STUB — needed for ParaView output (Milestone 2 remainder).
+  - Lid-driven cavity validation (Ghia et al. 1982) deferred to Milestone 4.

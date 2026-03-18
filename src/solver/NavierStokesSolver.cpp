@@ -2,13 +2,78 @@
 
 #include "utils/Logger.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <stdexcept>
 #include <string>
 
+// ── Internal helpers ──────────────────────────────────────────────────────────
+
+namespace
+{
+
+/// Parses a BC type string (case-insensitive) into a BoundaryType enum.
+/// @throws std::invalid_argument on unknown type string.
+BoundaryType parseBCType(const std::string& s)
+{
+    std::string upper = s;
+    std::transform(upper.begin(), upper.end(), upper.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+
+    if (upper == "INLET")    return BoundaryType::INLET;
+    if (upper == "OUTLET")   return BoundaryType::OUTLET;
+    if (upper == "WALL")     return BoundaryType::WALL;
+    if (upper == "SYMMETRY") return BoundaryType::SYMMETRY;
+
+    throw std::invalid_argument(
+        "NavierStokesSolver: unknown BC type '" + s + "'"
+        " (expected INLET, OUTLET, WALL, or SYMMETRY)");
+}
+
+/// Builds and returns a BoundaryCondition populated from config bc.* keys.
+/// Sides without a bc.<side>.type key are silently skipped.
+/// Value parsing: x = bc.<side>.value_x > bc.<side>.value > 0.0
+///                y = bc.<side>.value_y > 0.0
+BoundaryCondition buildBoundaryConditions(const Config& config)
+{
+    BoundaryCondition bc;
+
+    for (const std::string& side : std::initializer_list<std::string>{"left", "right", "bottom", "top"})
+    {
+        const std::string typeKey = "bc." + side + ".type";
+        if (!config.has(typeKey))
+            continue;
+
+        const BoundaryType bt = parseBCType(config.get<std::string>(typeKey));
+
+        const std::string vxKey = "bc." + side + ".value_x";
+        const std::string vKey  = "bc." + side + ".value";
+        const std::string vyKey = "bc." + side + ".value_y";
+
+        double vx = 0.0;
+        if (config.has(vxKey))
+            vx = config.get<double>(vxKey);
+        else if (config.has(vKey))
+            vx = config.get<double>(vKey);
+
+        double vy = 0.0;
+        if (config.has(vyKey))
+            vy = config.get<double>(vyKey);
+
+        bc.addPatch(side, {bt, Eigen::Vector2d(vx, vy)});
+    }
+
+    return bc;
+}
+
+}  // namespace
+
+// ── NavierStokesSolver ────────────────────────────────────────────────────────
+
 NavierStokesSolver::NavierStokesSolver(const Config& config)
 {
-    // Read all parameters from config; use safe defaults so that a
-    // default-constructed (empty) Config is still valid for testing.
+    // Read mesh and solver parameters from config with safe defaults,
+    // so that a default-constructed (empty) Config is still valid for testing.
     m_cfgNx     = config.get<int>   ("mesh.Nx",          16);
     m_cfgNy     = config.get<int>   ("mesh.Ny",          16);
     m_cfgLx     = config.get<double>("mesh.Lx",          1.0);
@@ -17,6 +82,9 @@ NavierStokesSolver::NavierStokesSolver(const Config& config)
     m_rho       = config.get<double>("solver.rho",        1.0);
     m_nu        = config.get<double>("solver.nu",         0.01);
     m_tolerance = config.get<double>("solver.tolerance",  1e-6);
+
+    // Parse boundary condition config; throws std::invalid_argument on unknown type.
+    m_bc = buildBoundaryConditions(config);
 }
 
 void NavierStokesSolver::initialize()
@@ -32,11 +100,17 @@ void NavierStokesSolver::initialize()
     // Construct pressure solver bound to the loaded mesh.
     m_pressureSolver.emplace(m_mesh);
 
+    // Apply boundary conditions to set initial field values at boundaries.
+    // Boundary conditions are applied after each field update in the SIMPLE loop;
+    // applying once here sets correct initial values for the first iteration.
+    m_bc.applyVelocity(m_velocity.value(), m_mesh);
+    m_bc.applyPressure(m_pressure.value(), m_mesh);
+
     m_initialized = true;
     m_residual    = 1.0;  // reset residual history
 
     Logger::get().info(
-        "NavierStokesSolver::initialize() - stub, mesh "
+        "NavierStokesSolver::initialize() - mesh "
         + std::to_string(m_cfgNx) + "x" + std::to_string(m_cfgNy));
 }
 

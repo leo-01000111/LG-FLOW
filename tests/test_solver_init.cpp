@@ -148,3 +148,59 @@ TEST(NavierStokesSolverInit, Initialize_ZeroNx_Throws)
     NavierStokesSolver solver(cfg);
     EXPECT_THROW(solver.initialize(), std::invalid_argument);
 }
+
+// ── BC wiring: config → solver → field ───────────────────────────────────────
+
+/// After initialize(), the top boundary cells must carry the lid velocity
+/// specified in the config (bc.top.value = 1.25 via fallback x-component).
+TEST(NavierStokesSolverInit, BCWiring_TopLid_SetsTopRow)
+{
+    namespace fs = std::filesystem;
+    const fs::path tmpFile =
+        fs::temp_directory_path() / "lgflow_test_bc_wiring.cfg";
+
+    {
+        std::ofstream ofs(tmpFile);
+        ASSERT_TRUE(ofs.is_open()) << "Cannot open temp config for writing";
+        ofs << "bc.top.type    = WALL\n";
+        ofs << "bc.top.value   = 1.25\n";   // fallback x-component
+        ofs << "bc.bottom.type = WALL\n";
+        ofs << "bc.left.type   = WALL\n";
+        ofs << "bc.right.type  = WALL\n";
+    }
+
+    Config cfg;
+    cfg.load(tmpFile.string());
+    fs::remove(tmpFile);
+
+    NavierStokesSolver solver(cfg);
+    solver.initialize();
+
+    const auto& vel = solver.velocity();
+    const int Nx = 16, Ny = 16;  // defaults
+
+    for (int i = 0; i < Nx; ++i) {
+        EXPECT_NEAR(vel(i, Ny - 1).x(), 1.25, 1e-12) << "top row, i=" << i;
+        EXPECT_NEAR(vel(i, Ny - 1).y(), 0.0,  1e-12) << "top row, i=" << i;
+    }
+}
+
+/// An unknown BC type string must cause std::invalid_argument in the constructor.
+TEST(NavierStokesSolverInit, BCWiring_InvalidType_Throws)
+{
+    namespace fs = std::filesystem;
+    const fs::path tmpFile =
+        fs::temp_directory_path() / "lgflow_test_bc_invalid.cfg";
+
+    {
+        std::ofstream ofs(tmpFile);
+        ASSERT_TRUE(ofs.is_open()) << "Cannot open temp config for writing";
+        ofs << "bc.top.type = NOTATYPE\n";
+    }
+
+    Config cfg;
+    cfg.load(tmpFile.string());
+    fs::remove(tmpFile);
+
+    EXPECT_THROW(NavierStokesSolver solver(cfg), std::invalid_argument);
+}
