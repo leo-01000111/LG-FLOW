@@ -92,6 +92,37 @@ NavierStokesSolver::NavierStokesSolver(const Config& config)
     m_vtkInterval = config.get<int>   ("output.vtk_interval",  100);
     m_outputDir   = config.get<std::string>("output.dir",      std::string("output"));
 
+    // Validate solver parameters — fail fast at construction rather than
+    // partway through a long run.
+    if (m_dt <= 0.0)
+        throw std::invalid_argument(
+            "NavierStokesSolver: solver.dt must be > 0 (got "
+            + std::to_string(m_dt) + ")");
+    if (m_rho <= 0.0)
+        throw std::invalid_argument(
+            "NavierStokesSolver: solver.rho must be > 0 (got "
+            + std::to_string(m_rho) + ")");
+    if (m_nu < 0.0)
+        throw std::invalid_argument(
+            "NavierStokesSolver: solver.nu must be >= 0 (got "
+            + std::to_string(m_nu) + ")");
+    if (m_tolerance <= 0.0)
+        throw std::invalid_argument(
+            "NavierStokesSolver: solver.tolerance must be > 0 (got "
+            + std::to_string(m_tolerance) + ")");
+    if (m_alphaU <= 0.0 || m_alphaU > 1.0)
+        throw std::invalid_argument(
+            "NavierStokesSolver: solver.alpha_u must be in (0, 1] (got "
+            + std::to_string(m_alphaU) + ")");
+    if (m_alphaP <= 0.0 || m_alphaP > 1.0)
+        throw std::invalid_argument(
+            "NavierStokesSolver: solver.alpha_p must be in (0, 1] (got "
+            + std::to_string(m_alphaP) + ")");
+    if (m_vtkInterval <= 0)
+        throw std::invalid_argument(
+            "NavierStokesSolver: output.vtk_interval must be > 0 (got "
+            + std::to_string(m_vtkInterval) + ")");
+
     // Parse boundary condition config; throws std::invalid_argument on unknown type.
     m_bc = buildBoundaryConditions(config);
 }
@@ -136,6 +167,11 @@ void NavierStokesSolver::checkInitialized(const char* callerName) const
 void NavierStokesSolver::step(double dt)
 {
     checkInitialized("step");
+
+    if (dt <= 0.0)
+        throw std::invalid_argument(
+            "NavierStokesSolver::step: dt must be > 0 (got "
+            + std::to_string(dt) + ")");
 
     // Save u^k before any modification — needed for residual and under-relaxation.
     const Field<Eigen::Vector2d> uOld = m_velocity.value();
@@ -210,6 +246,11 @@ void NavierStokesSolver::step(double dt)
 void NavierStokesSolver::run(int maxIter)
 {
     checkInitialized("run");
+
+    if (maxIter < 0)
+        throw std::invalid_argument(
+            "NavierStokesSolver::run: maxIter must be >= 0 (got "
+            + std::to_string(maxIter) + ")");
 
     // Ensure output directory exists before opening files.
     namespace fs = std::filesystem;

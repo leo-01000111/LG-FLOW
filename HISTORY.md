@@ -256,6 +256,90 @@ Rules:
   - `VTKWriter::write()` still STUB — needed for ParaView output (Milestone 2 remainder).
   - Lid-driven cavity validation (Ghia et al. 1982) deferred to Milestone 4.
 
+## 2026-03-19 00:30 (Europe/Warsaw) - Phase 7 Verification + Regression Harness (Review Fixes Included)
+- Author: Claude Code
+- Status: local-uncommitted
+- Summary:
+  - **Review fix 1 — Solver parameter validation:** `NavierStokesSolver` constructor now validates all
+    solver parameters at construction time, throwing `std::invalid_argument` for: `dt ≤ 0`,
+    `rho ≤ 0`, `nu < 0`, `tolerance ≤ 0`, `alpha_u ∉ (0,1]`, `alpha_p ∉ (0,1]`, `vtk_interval ≤ 0`.
+    `step(dt)` validates `dt > 0` before predictor work. `run(maxIter)` validates `maxIter >= 0`.
+  - **Review fix 2 — VTKWriter fully implemented:** `VTKWriter::write()` now writes a complete ASCII
+    XML VTU (UnstructuredGrid) file. One `VTK_VERTEX` per cell centre (z=0). Cell data arrays:
+    `pressure` (scalar) and `velocity` (3-component, z=0). Size-mismatch validation throws
+    `std::invalid_argument`. Non-existent output directory throws `std::runtime_error`.
+    VTK snapshots are now actually written during `run()` at every `vtk_interval` iterations.
+  - **Review fix 3 — PressureSolver linear solver upgrade:** Switched from `Eigen::BiCGSTAB`
+    (fails to converge for meshes ≥ 64×64 because default machine-epsilon tolerance is unreachable
+    in floating-point arithmetic) to `Eigen::SparseLU` (direct solver, unconditionally robust for
+    the sparse 5-point Laplacian stencil). No interface change; all 7 pressure solver tests pass.
+  - **Phase 7 — Validation executable `lgflow_validate_lid`:** New CMake target linking against
+    `flowcore_lib`. Loads `cases/lid_driven_cavity/case_validate.cfg` (32×32, dt=0.001, 500 iter),
+    runs SIMPLE loop, samples u(x≈0.5, y) and v(x, y≈0.5) centerlines via nearest-neighbour
+    column/row selection, writes `output/lid_driven_cavity/centerline.csv` (axis,coord,value),
+    and computes/reports L2 and Linf error metrics vs. Ghia et al. (1982) if
+    `cases/lid_driven_cavity/ghia1982_re100.csv` is present. No hard thresholds enforced.
+  - **New reference data file:** `cases/lid_driven_cavity/ghia1982_re100.csv` — 17 u-centerline
+    and 17 v-centerline points from Ghia et al. (1982) Table 1 and Table 3 at Re=100.
+  - **New validation config:** `cases/lid_driven_cavity/case_validate.cfg` — 32×32 mesh, dt=0.001
+    (stable explicit Euler at this resolution, ~50x safety margin over viscous CFL constraint).
+  - **New tests — test_solver_params.cpp (19 tests):** Covers all 7 constructor parameter
+    validations (including boundary values: nu=0, alpha_u=1.0, alpha_p=1.0 that must NOT throw),
+    `run(-1)` throws, and `step(0.0)` / `step(-0.01)` throw.
+  - **New tests — test_vtk_writer.cpp (9 tests):** Covers file creation, XML declaration,
+    UnstructuredGrid element, NumberOfPoints/NumberOfCells correctness, `Name="pressure"`,
+    `Name="velocity"`, pressure and velocity size-mismatch throws, and non-existent directory
+    throws.
+  - **README updated:** Validation executable usage (Windows), artifact table (history.csv,
+    centerline.csv, iter_*.vtu), benchmark comparison mode.
+  - Test count grew from 108 to 136; all 136 pass.
+- Files changed:
+  - `src/solver/NavierStokesSolver.cpp` (parameter validation in constructor, step, run)
+  - `src/solver/PressureSolver.cpp` (BiCGSTAB → SparseLU; include update)
+  - `src/io/VTKWriter.cpp` (full XML VTU implementation replacing STUB)
+  - `src/validate/lid_driven_cavity_validate.cpp` (new)
+  - `cases/lid_driven_cavity/ghia1982_re100.csv` (new)
+  - `cases/lid_driven_cavity/case_validate.cfg` (new)
+  - `tests/test_solver_params.cpp` (new)
+  - `tests/test_vtk_writer.cpp` (new)
+  - `tests/CMakeLists.txt` (added test_solver_params.cpp, test_vtk_writer.cpp)
+  - `CMakeLists.txt` (added lgflow_validate_lid target)
+  - `README.md` (status update, validation executable docs, artifact table)
+  - `HISTORY.md` (this entry)
+- Validation:
+  - `C:\Program Files\CMake\bin\cmake.exe --build build --config Debug`
+  - Build succeeded (flowcore_lib, lgflow, lgflow_tests, lgflow_validate_lid), zero warnings, zero errors.
+  - `C:\Program Files\CMake\bin\ctest.exe --test-dir build -C Debug --output-on-failure`
+  - Result: 136/136 tests passed (4.23 s).
+  - `build\Debug\lgflow_validate_lid.exe` (from FlowCore/):
+    ```
+    LG-Flow Validation: Lid-Driven Cavity
+    Config  : cases/lid_driven_cavity/case_validate.cfg
+    maxIter : 500
+    Mesh    : 32x32
+    [WARN ] run() reached maxIter=500 without convergence
+    Results : vel_residual=1.993e-03  cont_residual=3.315e+01
+    CSV     : output/lid_driven_cavity/centerline.csv  (32 u-points, 32 v-points)
+    Ref     : cases/lid_driven_cavity/ghia1982_re100.csv
+    u-line  : L2=1.309e-01  Linf=2.470e-01  (n=17)
+    v-line  : L2=1.275e-01  Linf=2.490e-01  (n=17)
+    [INFO] Metrics are informational — no pass/fail threshold enforced in Phase 7.
+    ```
+  - Artifacts produced: output/lid_driven_cavity/{centerline.csv, history.csv, iter_100..500.vtu}
+- Risks/TODOs:
+  - Solver has not converged in 500 iterations at 32x32; continuity residual (33.3) remains large.
+    Root cause: explicit forward-Euler momentum predictor and central-differencing convection create
+    slow SIMPLE convergence; the velocity correction is not perfectly consistent with the Poisson
+    stencil (gradient vs. two-point stencil mismatch). Milestone 4 scope: implicit momentum predictor
+    or upwind convection to achieve converged results at reasonable iteration count.
+  - Error metrics (L2≈0.13, Linf≈0.25) are high because the solver has not converged. After
+    convergence, 32×32 accuracy vs. Ghia would be limited by mesh resolution to ~O(dx)≈0.03.
+  - SparseLU memory usage grows as O(N^{1.5}) for 2D problems; for meshes above ~256×256, an
+    ILU-preconditioned BiCGSTAB would be more memory-efficient.
+  - `case.cfg` (64×64, dt=0.01) remains numerically unstable for the explicit Euler predictor
+    (large velocity gradient at lid corners drives divergence of u* above recoverable threshold).
+  - SYMMETRY BC is still a no-op (Phase 4 known limitation).
+
 ## 2026-03-18 23:55 (Europe/Warsaw) - Phase 6 SIMPLE Loop Integration + Runtime History Output
 - Author: Claude Code
 - Status: local-uncommitted

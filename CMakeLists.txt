@@ -77,6 +77,12 @@ add_executable(lgflow src/main.cpp)
 
 target_link_libraries(lgflow PRIVATE flowcore_lib)
 
+# ── Validation executable ─────────────────────────────────────────────────────
+# Run from FlowCore/: lgflow_validate_lid [config] [max_iter]
+add_executable(lgflow_validate_lid
+    src/validate/lid_driven_cavity_validate.cpp)
+target_link_libraries(lgflow_validate_lid PRIVATE flowcore_lib)
+
 # ── Tests ─────────────────────────────────────────────────────────────────────
 enable_testing()
 add_subdirectory(tests)

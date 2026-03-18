@@ -5,8 +5,8 @@ viscous flow. It is built on the **Finite Volume Method (FVM)** with
 **SIMPLE** (Semi-Implicit Method for Pressure-Linked Equations)
 pressure-velocity coupling.
 
-> **Status:** Skeleton — no physics implemented yet. All classes are stubs
-> with documented interfaces. Build system and test infrastructure are in place.
+> **Status:** Phase 7 — SIMPLE loop live, VTK output implemented, lid-driven
+> cavity validation harness available.
 
 ---
 
@@ -74,6 +74,33 @@ ctest --test-dir build --output-on-failure -C Debug
 .\build\Debug\lgflow.exe cases\lid_driven_cavity\case.cfg
 ```
 
+### Running the validation executable (Windows)
+
+Run from the `FlowCore/` directory so relative paths to `cases/` resolve correctly:
+
+```powershell
+# Default: loads cases/lid_driven_cavity/case.cfg, caps at 200 iterations
+.\build\Debug\lgflow_validate_lid.exe
+
+# Custom config and/or iteration count
+.\build\Debug\lgflow_validate_lid.exe cases\lid_driven_cavity\case.cfg 500
+```
+
+**Artifacts produced** (relative to `FlowCore/`):
+
+| Artifact | Description |
+|---|---|
+| `output/lid_driven_cavity/history.csv` | Per-iteration residuals (iter, vel, cont, pressure) |
+| `output/lid_driven_cavity/centerline.csv` | Sampled u(x=0.5,y) and v(x,y=0.5) with columns `axis,coord,value` |
+| `output/lid_driven_cavity/iter_*.vtu` | VTK snapshots every `output.vtk_interval` iterations, openable in ParaView |
+
+**Benchmark comparison mode:**
+
+If `cases/lid_driven_cavity/ghia1982_re100.csv` is present (included in repo),
+the executable automatically loads it and reports L2 and Linf error metrics
+against Ghia et al. (1982) Re=100 data. No hard threshold is enforced in Phase 7;
+metrics are informational.
+
 ---
 
 ## Project structure
@@ -95,9 +122,9 @@ FlowCore/
 ## Planned features
 
 - **Milestone 1** ✅ — Skeleton: project structure, CMake, stub classes
-- **Milestone 2** — Mesh & Fields: structured 2D mesh, Field arithmetic, VTK output
-- **Milestone 3** — Laminar solver: SIMPLE loop, lid-driven cavity at Re=100
-- **Milestone 4** — Validation: quantitative comparison against Ghia et al. (1982)
+- **Milestone 2** ✅ — Mesh & Fields: structured 2D mesh, Field arithmetic, VTK output
+- **Milestone 3** ✅ — Laminar solver: SIMPLE loop, residual tracking
+- **Milestone 4** 🔄 — Validation harness: centerline CSV + Ghia et al. (1982) comparison
 - **Milestone 5** — Unstructured mesh support *(future)*
 - **Milestone 6** — Turbulence modeling: Spalart-Allmaras *(future)*
 

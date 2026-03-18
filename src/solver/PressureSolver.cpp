@@ -1,8 +1,8 @@
 #include "solver/PressureSolver.hpp"
 #include "solver/Discretization.hpp"
 
-#include <Eigen/IterativeLinearSolvers>
 #include <Eigen/Sparse>
+#include <Eigen/SparseLU>
 
 #include <cmath>
 #include <stdexcept>
@@ -108,14 +108,25 @@ double PressureSolver::solve(Field<Eigen::Vector2d>& velocityField,
     A.setFromTriplets(triplets.begin(), triplets.end());
     A.makeCompressed();
 
-    // --- Step 4: Solve A * x = b (BiCGSTAB, non-symmetric) ---
-    Eigen::BiCGSTAB<Eigen::SparseMatrix<double>> bicgstab;
-    bicgstab.compute(A);
-    const Eigen::VectorXd x = bicgstab.solve(b);
+    // --- Step 4: Solve A * x = b (SparseLU direct solver) ---
+    // SparseLU is used instead of BiCGSTAB because the row-0 identity fix
+    // creates an asymmetric matrix that is difficult for iterative solvers
+    // at large mesh sizes (64x64 and above). SparseLU gives exact results
+    // for the sparse 5-point Laplacian stencil without iteration count risk.
+    // Reference: Eigen documentation — SparseLU.
+    Eigen::SparseLU<Eigen::SparseMatrix<double>> directSolver;
+    directSolver.analyzePattern(A);
+    directSolver.factorize(A);
 
-    if (bicgstab.info() != Eigen::Success)
+    if (directSolver.info() != Eigen::Success)
         throw std::runtime_error(
-            "PressureSolver::solve: BiCGSTAB failed to converge");
+            "PressureSolver::solve: SparseLU factorization failed (singular matrix?)");
+
+    const Eigen::VectorXd x = directSolver.solve(b);
+
+    if (directSolver.info() != Eigen::Success)
+        throw std::runtime_error(
+            "PressureSolver::solve: SparseLU solve step failed");
 
     // --- Step 5: Verify finite solution ---
     for (int i = 0; i < N; ++i)
