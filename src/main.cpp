@@ -28,15 +28,18 @@ int main(int argc, char* argv[])
 
     const std::string configPath = argv[1];
 
-    // Validate that the config file path exists before attempting to parse it.
-    if (!std::filesystem::exists(configPath))
-    {
-        log.error("Config file not found: '" + configPath + "'");
-        return 1;
-    }
-
     try
     {
+        // Validate that the config file path exists.
+        // Use the error_code overload so no exception is thrown by exists() itself.
+        std::error_code ecExists;
+        if (!std::filesystem::exists(configPath, ecExists))
+        {
+            log.error("Config file not found: '" + configPath + "'" +
+                      (ecExists ? " (" + ecExists.message() + ")" : ""));
+            return 1;
+        }
+
         // Load configuration
         Config config;
         config.load(configPath);

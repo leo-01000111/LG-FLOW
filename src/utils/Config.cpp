@@ -13,6 +13,9 @@
 
 void Config::load(const std::string& filepath)
 {
+    // Clear any previously loaded state so reload does not retain stale keys.
+    m_entries.clear();
+
     std::ifstream file(filepath);
     if (!file.is_open())
         throw std::runtime_error("Config: cannot open file '" + filepath + "'");

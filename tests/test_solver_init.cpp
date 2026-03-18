@@ -3,6 +3,8 @@
 
 #include <gtest/gtest.h>
 #include <stdexcept>
+#include <filesystem>
+#include <fstream>
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -121,12 +123,28 @@ TEST(NavierStokesSolverInit, Residual_AlwaysAccessible)
 
 TEST(NavierStokesSolverInit, Initialize_ZeroNx_Throws)
 {
-    // Provide a config that requests a zero-cell mesh dimension.
-    // Mesh::load() should propagate std::invalid_argument.
-    // We test this via a custom Config with mesh.Nx = 0.
-    // Since Config requires file loading, construct solver with default
-    // (Nx=16) then test Mesh independently -- or rely on Mesh tests.
-    // Here we just verify the throw propagates:
-    // TODO(Milestone 2): inject a zero-Nx config and verify std::invalid_argument.
-    EXPECT_TRUE(true);
+    // Write a temporary config file with mesh.Nx = 0.
+    // NavierStokesSolver::initialize() must propagate std::invalid_argument
+    // from Mesh::load() when a non-positive dimension is supplied.
+    namespace fs = std::filesystem;
+    const fs::path tmpFile =
+        fs::temp_directory_path() / "lgflow_test_zero_nx.cfg";
+
+    {
+        std::ofstream ofs(tmpFile);
+        ASSERT_TRUE(ofs.is_open()) << "Cannot open temp config file for writing";
+        ofs << "mesh.Nx = 0\n";
+        ofs << "mesh.Ny = 16\n";
+        ofs << "mesh.Lx = 1.0\n";
+        ofs << "mesh.Ly = 1.0\n";
+    }
+
+    Config cfg;
+    cfg.load(tmpFile.string());
+
+    // Clean up before the assertion so we never leave a temp file behind.
+    fs::remove(tmpFile);
+
+    NavierStokesSolver solver(cfg);
+    EXPECT_THROW(solver.initialize(), std::invalid_argument);
 }
