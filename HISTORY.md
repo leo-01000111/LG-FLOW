@@ -255,3 +255,64 @@ Rules:
     velocity correction + BC apply + repeat) remains STUB — next phase scope.
   - `VTKWriter::write()` still STUB — needed for ParaView output (Milestone 2 remainder).
   - Lid-driven cavity validation (Ghia et al. 1982) deferred to Milestone 4.
+
+## 2026-03-18 23:55 (Europe/Warsaw) - Phase 6 SIMPLE Loop Integration + Runtime History Output
+- Author: Claude Code
+- Status: local-uncommitted
+- Metadata correction:
+  - Phase 2 (Mesh Geometry Core) was committed as `6136e80`; Phase 2 HISTORY entry incorrectly listed "local-uncommitted".
+  - Phase 3 (Field Algebra + Discretization) was committed as `4e2b956`; Phase 3 HISTORY entry also listed "local-uncommitted".
+  - Phase 4 (Boundary Conditions) was committed as `3d31704`; Phase 4 HISTORY entry also listed "local-uncommitted".
+  - Phase 5 HISTORY entry also listed "local-uncommitted"; commit hash not recorded in this entry.
+- Summary:
+  - Implemented `NavierStokesSolver::step(dt)` — full SIMPLE iteration replacing the STUB:
+    1. Momentum predictor: decomposes velocity into scalar ux/uy fields, computes
+       `Discretization::gradient` and `Discretization::laplacian` for each component plus
+       `Discretization::gradient(p)`, then applies explicit forward-Euler update
+       `u* = u^k + dt*[-(u·∇)u - (1/ρ)∇p^k + ν∇²u^k]` (central differencing,
+       Ferziger & Peric 4th ed. eq. 7.20).
+    2. Pressure correction: delegates to `PressureSolver::solve(uStar, pressure, dt, rho, alphaP)`
+       which updates `uStar` and `pressure` in place (Patankar 1980 eqs. 6.28–6.31).
+    3. Velocity under-relaxation: `u^{k+1} = α_u·u* + (1-α_u)·u^k` via `Field::operator*` and `+`.
+    4. Apply BCs: `m_bc.applyVelocity` and `m_bc.applyPressure` after field update.
+    5. Residual tracking: velocity residual = `||u^{k+1}-u^k|| / max(||u^k||, 1e-12)`;
+       continuity residual = `||∇·u^{k+1}||_2`. NaN/Inf on any residual throws `std::runtime_error`.
+  - Implemented `NavierStokesSolver::run(maxIter)` — full run loop replacing the STUB:
+    - Creates `output.dir` with `std::filesystem::create_directories`.
+    - Opens `history.csv` and writes header `iter,vel_residual,cont_residual,pressure_residual`.
+    - Appends one row per iteration (scientific notation, 8 decimal places).
+    - Logs progress every 50 iterations via `Logger`.
+    - Writes VTK snapshot every `output.vtk_interval` iterations (VTKWriter still STUB, call site live).
+    - Convergence criterion: both `m_velResidual < tolerance` AND `m_contResidual < tolerance`.
+  - Added config keys with defaults: `solver.alpha_u` (0.7), `solver.alpha_p` (0.3),
+    `output.vtk_interval` (100), `output.dir` ("output").
+  - Added public accessors: `velocityResidual()`, `continuityResidual()`, `pressureResidual()`.
+    `residual()` retained as alias for `velocityResidual()` (API compatibility).
+  - Added `VTKWriter m_vtkWriter` as value member in `NavierStokesSolver`.
+  - Added `tests/test_solver_run.cpp` with 4 tests (108 total from 104):
+    `Step_AfterInit_ResidualsAreFinite`,
+    `Run_WritesHistoryCsv_WithHeaderAndRows`,
+    `Run_MaxIterZero_DoesNotThrow`,
+    `Run_ConvergenceCheck_UsesBothVelocityAndContinuityResiduals`.
+  - Removed `m_residual` member; replaced by `m_velResidual` (same semantics, no API breakage).
+- Files changed:
+  - `src/solver/NavierStokesSolver.hpp`
+  - `src/solver/NavierStokesSolver.cpp`
+  - `tests/test_solver_run.cpp` (new)
+  - `tests/CMakeLists.txt`
+  - `HISTORY.md` (metadata corrections to Phases 2–5 + this entry)
+- Validation:
+  - `C:\Program Files\CMake\bin\cmake.exe --build build --config Debug`
+  - Build succeeded (`flowcore_lib`, `lgflow`, `lgflow_tests`), zero warnings, zero errors.
+  - `C:\Program Files\CMake\bin\ctest.exe --test-dir build -C Debug --output-on-failure`
+  - Result: 108/108 tests passed (4.89 s).
+- Risks/TODOs:
+  - Momentum predictor uses explicit (forward-Euler) time integration; for high Reynolds numbers
+    or large dt this will be unstable. An implicit or semi-implicit momentum solve is needed
+    for Milestone 3 production runs.
+  - Convective term uses central differencing (`Discretization::gradient`); upwind differencing
+    may be required at higher Re to suppress spurious oscillations.
+  - On a zero-initialized mesh the solver trivially converges in one step (all residuals = 0).
+    Non-trivial lid-driven cavity convergence requires a non-zero lid BC and sufficient iterations.
+  - `VTKWriter::write()` is still STUB — no .vtu files are written yet (Milestone 2 remainder).
+  - Lid-driven cavity validation (Ghia et al. 1982) deferred to Milestone 4.

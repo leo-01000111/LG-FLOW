@@ -3,11 +3,13 @@
 #include "core/BoundaryCondition.hpp"
 #include "core/Field.hpp"
 #include "core/Mesh.hpp"
+#include "io/VTKWriter.hpp"
 #include "solver/PressureSolver.hpp"
 #include "utils/Config.hpp"
 
 #include <Eigen/Dense>
 #include <optional>
+#include <string>
 
 /**
  * @brief Top-level orchestrator for the incompressible Navier-Stokes solver.
@@ -86,22 +88,44 @@ public:
     /**
      * @brief Runs the solver until convergence or maxIter is reached.
      *
-     * Calls step() in a loop, logging residual every 100 iterations.
-     * Stops when residual() < tolerance (from config).
+     * Calls step() in a loop, logging progress every 50 iterations.
+     * Stops when velocityResidual() < tolerance AND
+     * continuityResidual() < tolerance (from config).
+     * Writes history.csv in output.dir with one row per iteration.
+     * Writes VTK snapshots every output.vtk_interval iterations.
      *
      * @param maxIter Maximum number of SIMPLE iterations.
-     * @throws std::logic_error if called before initialize().
+     * @throws std::logic_error   if called before initialize().
+     * @throws std::runtime_error if history.csv cannot be created.
      */
     void run(int maxIter);
 
     /**
      * @brief Returns the current normalised velocity residual.
      *
-     * Residual = ||u_new - u_old|| / ||u_inlet|| (L2 norm, dimensionless).
+     * Equivalent to velocityResidual(). Retained for API compatibility.
      *
-     * @return Normalised residual (0 = converged).
+     * @return ||u_new - u_old|| / max(||u_old||, 1e-12)
      */
     [[nodiscard]] double residual() const;
+
+    /**
+     * @brief Returns the current velocity residual.
+     * @return ||u^{k+1} - u^k|| / max(||u^k||, 1e-12)
+     */
+    [[nodiscard]] double velocityResidual() const;
+
+    /**
+     * @brief Returns the current continuity (divergence) residual.
+     * @return ||∇·u^{k+1}||_2
+     */
+    [[nodiscard]] double continuityResidual() const;
+
+    /**
+     * @brief Returns the pressure-solver residual from the last step.
+     * @return ||A p' - b||_2 from the last pressure-correction solve.
+     */
+    [[nodiscard]] double pressureResidual() const;
 
     /**
      * @brief Read-only access to the pressure field.
@@ -117,18 +141,24 @@ public:
 
 private:
     // ── Config parameters (set in constructor, immutable after) ──────────────
-    int    m_cfgNx{16};
-    int    m_cfgNy{16};
-    double m_cfgLx{1.0};
-    double m_cfgLy{1.0};
-    double m_dt{0.01};
-    double m_rho{1.0};
-    double m_nu{0.01};
-    double m_tolerance{1e-6};
+    int         m_cfgNx{16};
+    int         m_cfgNy{16};
+    double      m_cfgLx{1.0};
+    double      m_cfgLy{1.0};
+    double      m_dt{0.01};
+    double      m_rho{1.0};
+    double      m_nu{0.01};
+    double      m_tolerance{1e-6};
+    double      m_alphaU{0.7};      ///< Velocity under-relaxation factor
+    double      m_alphaP{0.3};      ///< Pressure under-relaxation factor
+    int         m_vtkInterval{100}; ///< Write VTK every N iterations
+    std::string m_outputDir{"output"};
 
     // ── Runtime state (valid only after initialize()) ─────────────────────────
-    bool m_initialized{false};
-    double m_residual{1.0};
+    bool   m_initialized{false};
+    double m_velResidual{1.0};      ///< ||u^{k+1} - u^k|| / max(||u^k||, 1e-12)
+    double m_contResidual{1.0};     ///< ||∇·u^{k+1}||_2
+    double m_pressureResidual{0.0}; ///< ||A p' - b||_2 from PressureSolver
 
     Mesh m_mesh;  ///< Mesh is a value member; address is stable, safe to hold refs to it.
 
@@ -142,6 +172,8 @@ private:
 
     /// Pressure solver; empty until initialize() (requires loaded mesh).
     std::optional<PressureSolver> m_pressureSolver;
+
+    VTKWriter m_vtkWriter;  ///< VTK output writer (stub until Milestone 2).
 
     /**
      * @brief Guards all methods that require prior initialization.
