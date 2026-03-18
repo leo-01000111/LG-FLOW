@@ -1,0 +1,45 @@
+# Build directories
+build/
+build-*/
+cmake-build-*/
+out/
+
+# CMake generated
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+_deps/
+
+# Compiled output
+*.o
+*.a
+*.so
+*.dll
+*.exe
+lgflow
+
+# Sanitizer / profiling
+*.profdata
+*.profraw
+
+# VTK output (never commit simulation results)
+*.vtu
+*.vtk
+output/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Dependency managers
+vcpkg_installed/
+
+PLAN.md
