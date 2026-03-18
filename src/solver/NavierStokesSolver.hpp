@@ -128,6 +128,17 @@ public:
     [[nodiscard]] double pressureResidual() const;
 
     /**
+     * @brief Returns the effective time step used in the last step() call.
+     *
+     * May be smaller than the user-supplied dt when the CFL safety clamp
+     * reduces the step to satisfy the convective or diffusive stability limit.
+     * Returns 0.0 before the first call to step() or run().
+     *
+     * @return dt_eff = min(dt, max_cfl_conv*h/||u||, max_cfl_diff*h²/ν)
+     */
+    [[nodiscard]] double dtEffective() const;
+
+    /**
      * @brief Read-only access to the pressure field.
      * @throws std::logic_error if called before initialize().
      */
@@ -140,25 +151,35 @@ public:
     [[nodiscard]] const Field<Eigen::Vector2d>& velocity() const;
 
 private:
+    // ── Convection scheme ─────────────────────────────────────────────────────
+    /// Convection discretization options.
+    /// CENTRAL: Gauss face-average (central differencing, 2nd order).
+    /// UPWIND:  Donor-cell (first-order upwind, unconditionally stable).
+    enum class ConvectionScheme { CENTRAL, UPWIND };
+
     // ── Config parameters (set in constructor, immutable after) ──────────────
-    int         m_cfgNx{16};
-    int         m_cfgNy{16};
-    double      m_cfgLx{1.0};
-    double      m_cfgLy{1.0};
-    double      m_dt{0.01};
-    double      m_rho{1.0};
-    double      m_nu{0.01};
-    double      m_tolerance{1e-6};
-    double      m_alphaU{0.7};      ///< Velocity under-relaxation factor
-    double      m_alphaP{0.3};      ///< Pressure under-relaxation factor
-    int         m_vtkInterval{100}; ///< Write VTK every N iterations
-    std::string m_outputDir{"output"};
+    int              m_cfgNx{16};
+    int              m_cfgNy{16};
+    double           m_cfgLx{1.0};
+    double           m_cfgLy{1.0};
+    double           m_dt{0.01};
+    double           m_rho{1.0};
+    double           m_nu{0.01};
+    double           m_tolerance{1e-6};
+    double           m_alphaU{0.7};         ///< Velocity under-relaxation factor
+    double           m_alphaP{0.3};         ///< Pressure under-relaxation factor
+    int              m_vtkInterval{100};    ///< Write VTK every N iterations
+    std::string      m_outputDir{"output"};
+    ConvectionScheme m_convScheme{ConvectionScheme::UPWIND}; ///< Convection scheme
+    double           m_maxCflConv{0.5};     ///< Max convective CFL for dt clamp
+    double           m_maxCflDiff{0.5};     ///< Max diffusive CFL for dt clamp
 
     // ── Runtime state (valid only after initialize()) ─────────────────────────
     bool   m_initialized{false};
     double m_velResidual{1.0};      ///< ||u^{k+1} - u^k|| / max(||u^k||, 1e-12)
     double m_contResidual{1.0};     ///< ||∇·u^{k+1}||_2
     double m_pressureResidual{0.0}; ///< ||A p' - b||_2 from PressureSolver
+    double m_dtEff{0.0};            ///< Effective dt after CFL clamp (set by step())
 
     Mesh m_mesh;  ///< Mesh is a value member; address is stable, safe to hold refs to it.
 

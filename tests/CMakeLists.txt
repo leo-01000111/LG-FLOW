@@ -12,6 +12,7 @@ add_executable(lgflow_tests
     test_solver_run.cpp
     test_solver_params.cpp
     test_vtk_writer.cpp
+    test_solver_convection.cpp
 )
 
 target_link_libraries(lgflow_tests

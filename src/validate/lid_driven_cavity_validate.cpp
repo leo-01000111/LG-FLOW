@@ -71,9 +71,13 @@ struct ErrorMetrics
 
 // ── Centerline sampling ───────────────────────────────────────────────────────
 
-/// Samples u(x≈0.5, y) and v(x, y≈0.5) from the post-run velocity field.
-/// The column/row closest to x=0.5 or y=0.5 is selected (nearest-neighbour).
+/// Samples u(x≈midX, y) and v(x, y≈midY) from the post-run velocity field.
+/// The column/row closest to midX or midY is selected (nearest-neighbour).
+/// @param midX  x-coordinate of the vertical centerline (typically Lx/2)
+/// @param midY  y-coordinate of the horizontal centerline (typically Ly/2)
 void sampleCenterlines(const Field<Eigen::Vector2d>& vel,
+                       double midX,
+                       double midY,
                        std::vector<CenterlineSample>& uSamples,
                        std::vector<CenterlineSample>& vSamples)
 {
@@ -81,21 +85,21 @@ void sampleCenterlines(const Field<Eigen::Vector2d>& vel,
     const int   Nx   = mesh.Nx();
     const int   Ny   = mesh.Ny();
 
-    // Find column i_mid: centre x closest to 0.5 (assumes Lx = 1.0)
+    // Find column i_mid: centre x closest to midX
     int    i_mid    = 0;
     double minDistX = std::numeric_limits<double>::max();
     for (int i = 0; i < Nx; ++i)
     {
-        const double dist = std::abs(mesh.getCellCenter(i, 0).x() - 0.5);
+        const double dist = std::abs(mesh.getCellCenter(i, 0).x() - midX);
         if (dist < minDistX) { minDistX = dist; i_mid = i; }
     }
 
-    // Find row j_mid: centre y closest to 0.5 (assumes Ly = 1.0)
+    // Find row j_mid: centre y closest to midY
     int    j_mid    = 0;
     double minDistY = std::numeric_limits<double>::max();
     for (int j = 0; j < Ny; ++j)
     {
-        const double dist = std::abs(mesh.getCellCenter(0, j).y() - 0.5);
+        const double dist = std::abs(mesh.getCellCenter(0, j).y() - midY);
         if (dist < minDistY) { minDistY = dist; j_mid = j; }
     }
 
@@ -235,25 +239,41 @@ int main(int argc, char* argv[])
         NavierStokesSolver solver(cfg);
         solver.initialize();
 
-        const int Nx = cfg.get<int>("mesh.Nx", 16);
-        const int Ny = cfg.get<int>("mesh.Ny", 16);
+        const int    Nx = cfg.get<int>   ("mesh.Nx", 16);
+        const int    Ny = cfg.get<int>   ("mesh.Ny", 16);
+        const double Lx = cfg.get<double>("mesh.Lx", 1.0);
+        const double Ly = cfg.get<double>("mesh.Ly", 1.0);
         std::cout << "Mesh    : " << Nx << "x" << Ny << "\n";
 
-        solver.run(maxIter);
-
-        std::cout << std::scientific << std::setprecision(3);
-        std::cout << "Results : vel_residual=" << solver.velocityResidual()
-                  << "  cont_residual=" << solver.continuityResidual() << "\n";
-
-        // Sample centerlines from final velocity field
-        const auto& vel = solver.velocity();
-        std::vector<CenterlineSample> uSamples, vSamples;
-        sampleCenterlines(vel, uSamples, vSamples);
-
-        // Write centerline CSV
         const std::string outDir =
             cfg.get<std::string>("output.dir", "output/lid_driven_cavity");
         std::filesystem::create_directories(outDir);
+
+        solver.run(maxIter);
+
+        // Count actual iterations from history.csv (written by run()).
+        int actualIter = 0;
+        {
+            std::ifstream hist(outDir + "/history.csv");
+            std::string   line;
+            while (std::getline(hist, line))
+                ++actualIter;
+            if (actualIter > 0)
+                --actualIter;  // subtract header row
+        }
+
+        std::cout << std::scientific << std::setprecision(3);
+        std::cout << "Results : vel_residual=" << solver.velocityResidual()
+                  << "  cont_residual=" << solver.continuityResidual()
+                  << "  iterations=" << actualIter << "\n";
+
+        // Sample centerlines from final velocity field.
+        // Midpoints are at Lx/2 and Ly/2 to generalise beyond unit-square domains.
+        const auto& vel = solver.velocity();
+        std::vector<CenterlineSample> uSamples, vSamples;
+        sampleCenterlines(vel, Lx * 0.5, Ly * 0.5, uSamples, vSamples);
+
+        // Write centerline CSV
         const std::string csvPath = outDir + "/centerline.csv";
         writeCenterlineCSV(csvPath, uSamples, vSamples);
         std::cout << "CSV     : " << csvPath
@@ -265,14 +285,16 @@ int main(int argc, char* argv[])
             "cases/lid_driven_cavity/ghia1982_re100.csv";
         const auto refs = loadReference(refPath);
 
+        ErrorMetrics uErr, vErr;
+
         if (refs.empty())
         {
             std::cout << "Ref     : not found (" << refPath << ")\n";
         }
         else
         {
-            const ErrorMetrics uErr = computeErrors(uSamples, refs, "u");
-            const ErrorMetrics vErr = computeErrors(vSamples, refs, "v");
+            uErr = computeErrors(uSamples, refs, "u");
+            vErr = computeErrors(vSamples, refs, "v");
 
             std::cout << "Ref     : " << refPath << "\n";
             std::cout << "u-line  : L2=" << uErr.l2
@@ -282,7 +304,27 @@ int main(int argc, char* argv[])
                       << "  Linf=" << vErr.linf
                       << "  (n=" << vErr.n << ")\n";
             std::cout << "[INFO] Metrics are informational — no pass/fail"
-                         " threshold enforced in Phase 7.\n";
+                         " threshold enforced.\n";
+        }
+
+        // Write validation_metrics.csv — machine-readable summary.
+        {
+            const std::string metricsPath = outDir + "/validation_metrics.csv";
+            std::ofstream     mout(metricsPath);
+            if (!mout.is_open())
+                throw std::runtime_error(
+                    "Cannot write validation_metrics.csv: " + metricsPath);
+
+            mout << std::scientific << std::setprecision(8);
+            mout << "metric,value\n";
+            mout << "final_vel_residual,"  << solver.velocityResidual()    << "\n";
+            mout << "final_cont_residual," << solver.continuityResidual()  << "\n";
+            mout << "u_l2,"               << uErr.l2                      << "\n";
+            mout << "u_linf,"             << uErr.linf                     << "\n";
+            mout << "v_l2,"               << vErr.l2                      << "\n";
+            mout << "v_linf,"             << vErr.linf                     << "\n";
+            mout << "iterations,"         << actualIter                    << "\n";
+            std::cout << "Metrics : " << metricsPath << "\n";
         }
     }
     catch (const std::exception& e)
