@@ -1,9 +1,6 @@
 #include "utils/Logger.hpp"
 
-#include <chrono>
-#include <ctime>
 #include <iostream>
-#include <string_view>
 
 // ── Singleton ────────────────────────────────────────────────────────────────
 
@@ -27,10 +24,18 @@ void Logger::setLevel(LogLevel level)
 
 void Logger::log(LogLevel level, std::string_view message)
 {
+    // Filter: messages below the configured minimum level are silently dropped.
+    // LogLevel is ordered DEBUG(0) < INFO(1) < WARN(2) < ERROR(3); the enum
+    // underlying-int comparison makes this work without explicit numeric casts.
     if (level < m_minLevel)
         return;
 
-    // STUB: timestamp and formatted output will be implemented in Milestone 2
+    // Output format (stable for tests):
+    //   [-----] [LEVEL] message\n
+    //
+    // The "[-----]" timestamp placeholder will be replaced with a real
+    // HH:MM:SS timestamp in Milestone 2. The format of the LEVEL tag is
+    // fixed-width (5 chars) so log lines are easy to parse/grep.
     std::string_view tag;
     switch (level)
     {
@@ -38,6 +43,7 @@ void Logger::log(LogLevel level, std::string_view message)
         case LogLevel::INFO:  tag = "INFO "; break;
         case LogLevel::WARN:  tag = "WARN "; break;
         case LogLevel::ERROR: tag = "ERROR"; break;
+        default:              tag = "?????"; break;
     }
 
     std::cout << "[-----] [" << tag << "] " << message << '\n';

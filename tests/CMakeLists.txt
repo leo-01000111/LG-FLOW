@@ -4,6 +4,9 @@ add_executable(lgflow_tests
     test_mesh.cpp
     test_field.cpp
     test_bc.cpp
+    test_config.cpp
+    test_logger.cpp
+    test_solver_init.cpp
 )
 
 target_link_libraries(lgflow_tests

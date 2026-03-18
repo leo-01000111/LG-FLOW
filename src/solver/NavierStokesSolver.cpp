@@ -2,34 +2,60 @@
 
 #include "utils/Logger.hpp"
 
+#include <stdexcept>
+#include <string>
+
 NavierStokesSolver::NavierStokesSolver(const Config& config)
-    : m_mesh()
-    , m_pressure(m_mesh)    // bound to m_mesh; re-initialised in initialize()
-    , m_velocity(m_mesh)
-    , m_bc()
-    , m_pressureSolver(m_mesh)
 {
-    // STUB: Read parameters from config.
-    // Will be fully implemented in Milestone 3.
-    m_dt        = config.get<double>("solver.dt",        0.01);
-    m_rho       = config.get<double>("solver.rho",       1.0);
-    m_nu        = config.get<double>("solver.nu",        0.01);
-    m_tolerance = config.get<double>("solver.tolerance", 1e-6);
+    // Read all parameters from config; use safe defaults so that a
+    // default-constructed (empty) Config is still valid for testing.
+    m_cfgNx     = config.get<int>   ("mesh.Nx",          16);
+    m_cfgNy     = config.get<int>   ("mesh.Ny",          16);
+    m_cfgLx     = config.get<double>("mesh.Lx",          1.0);
+    m_cfgLy     = config.get<double>("mesh.Ly",          1.0);
+    m_dt        = config.get<double>("solver.dt",         0.01);
+    m_rho       = config.get<double>("solver.rho",        1.0);
+    m_nu        = config.get<double>("solver.nu",         0.01);
+    m_tolerance = config.get<double>("solver.tolerance",  1e-6);
 }
 
 void NavierStokesSolver::initialize()
 {
-    // STUB: Build mesh, allocate fields, set up BCs, zero-initialise.
-    // Will be implemented in Milestone 2 (mesh) and Milestone 3 (BCs).
-    Logger::get().info("NavierStokesSolver::initialize() — stub");
+    // Build the mesh from config dimensions. Throws std::invalid_argument on
+    // bad dimensions (zero, negative) propagated from Mesh::load().
+    m_mesh.load(m_cfgNx, m_cfgNy, m_cfgLx, m_cfgLy);
+
+    // Allocate fields bound to the now-loaded mesh, zero-initialised.
+    m_pressure.emplace(m_mesh, 0.0);
+    m_velocity.emplace(m_mesh, Eigen::Vector2d::Zero());
+
+    // Construct pressure solver bound to the loaded mesh.
+    m_pressureSolver.emplace(m_mesh);
+
+    m_initialized = true;
+    m_residual    = 1.0;  // reset residual history
+
+    Logger::get().info(
+        "NavierStokesSolver::initialize() - stub, mesh "
+        + std::to_string(m_cfgNx) + "x" + std::to_string(m_cfgNy));
+}
+
+void NavierStokesSolver::checkInitialized(const char* callerName) const
+{
+    if (!m_initialized)
+        throw std::logic_error(
+            std::string("NavierStokesSolver::") + callerName +
+            "() called before initialize() -- call initialize() first");
 }
 
 void NavierStokesSolver::step(double /*dt*/)
 {
+    checkInitialized("step");
+
     // STUB: SIMPLE iteration.
     // Order (must not be reordered without explanation):
     //   1. Momentum predictor
-    //   2. m_pressureSolver.solve(...)
+    //   2. m_pressureSolver->solve(...)
     //   3. Velocity correction
     //   4. m_bc.applyVelocity / applyPressure
     // Will be implemented in Milestone 3.
@@ -37,8 +63,11 @@ void NavierStokesSolver::step(double /*dt*/)
 
 void NavierStokesSolver::run(int maxIter)
 {
-    Logger::get().info("NavierStokesSolver::run() — stub, maxIter = "
-                       + std::to_string(maxIter));
+    checkInitialized("run");
+
+    Logger::get().info(
+        "NavierStokesSolver::run() - stub, maxIter = "
+        + std::to_string(maxIter));
 
     for (int iter = 0; iter < maxIter; ++iter)
     {
@@ -61,10 +90,12 @@ double NavierStokesSolver::residual() const
 
 const Field<double>& NavierStokesSolver::pressure() const
 {
-    return m_pressure;
+    checkInitialized("pressure");
+    return m_pressure.value();
 }
 
 const Field<Eigen::Vector2d>& NavierStokesSolver::velocity() const
 {
-    return m_velocity;
+    checkInitialized("velocity");
+    return m_velocity.value();
 }

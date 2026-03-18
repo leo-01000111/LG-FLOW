@@ -29,6 +29,18 @@ sudo apt install cmake libeigen3-dev libgtest-dev
 brew install cmake eigen googletest
 ```
 
+### Installing dependencies (Windows, MSVC + vcpkg)
+```powershell
+# Core tools
+winget install --id Kitware.CMake -e
+winget install --id Microsoft.VisualStudio.2022.BuildTools -e
+
+# Dependencies (Eigen3 + GoogleTest)
+git clone https://github.com/microsoft/vcpkg C:\vcpkg
+C:\vcpkg\bootstrap-vcpkg.bat
+C:\vcpkg\vcpkg.exe install eigen3:x64-windows gtest:x64-windows
+```
+
 ---
 
 ## Build instructions
@@ -48,6 +60,18 @@ cd build && ctest --output-on-failure
 
 # Run solver
 ./build/lgflow cases/lid_driven_cavity/case.cfg
+```
+
+### Build on Windows (PowerShell + vcpkg toolchain)
+```powershell
+cmake -S . -B build `
+  -DCMAKE_BUILD_TYPE=Debug `
+  -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake `
+  -DVCPKG_TARGET_TRIPLET=x64-windows
+
+cmake --build build --config Debug
+ctest --test-dir build --output-on-failure -C Debug
+.\build\Debug\lgflow.exe cases\lid_driven_cavity\case.cfg
 ```
 
 ---

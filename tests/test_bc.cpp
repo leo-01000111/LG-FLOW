@@ -39,7 +39,7 @@ TEST(BoundaryCondition, AddAndGetPatch_RoundTrip)
 TEST(BoundaryCondition, GetPatch_UnknownName_Throws)
 {
     BoundaryCondition bc;
-    EXPECT_THROW(bc.getPatch("nonexistent"), std::out_of_range);
+    EXPECT_THROW(static_cast<void>(bc.getPatch("nonexistent")), std::out_of_range);
 }
 
 /**

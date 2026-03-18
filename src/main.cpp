@@ -3,6 +3,7 @@
 #include "utils/Config.hpp"
 #include "utils/Logger.hpp"
 
+#include <filesystem>
 #include <stdexcept>
 #include <string>
 
@@ -17,7 +18,7 @@
 int main(int argc, char* argv[])
 {
     Logger& log = Logger::get();
-    log.info("LG-Flow — 2D incompressible Navier-Stokes solver (stub)");
+    log.info("LG-Flow - 2D incompressible Navier-Stokes solver (stub)");
 
     if (argc < 2)
     {
@@ -25,26 +26,45 @@ int main(int argc, char* argv[])
         return 1;
     }
 
+    const std::string configPath = argv[1];
+
+    // Validate that the config file path exists before attempting to parse it.
+    if (!std::filesystem::exists(configPath))
+    {
+        log.error("Config file not found: '" + configPath + "'");
+        return 1;
+    }
+
     try
     {
         // Load configuration
         Config config;
-        config.load(argv[1]);
-        log.info("Config loaded from: " + std::string(argv[1]));
+        config.load(configPath);
+        log.info("Config loaded from: " + configPath);
 
         // Construct and initialise solver
         NavierStokesSolver solver(config);
         solver.initialize();
 
         // Run SIMPLE loop
-        int maxIter = config.get<int>("solver.max_iter", 1000);
+        const int maxIter = config.get<int>("solver.max_iter", 1000);
         solver.run(maxIter);
 
         log.info("Solver finished. Residual = "
                  + std::to_string(solver.residual()));
 
+        // Prepare output directory: create it if it does not exist.
+        const std::string outDir = config.get<std::string>("output.dir", "output");
+        std::error_code ec;
+        std::filesystem::create_directories(outDir, ec);
+        if (ec)
+        {
+            log.error("Cannot create output directory '" + outDir
+                      + "': " + ec.message());
+            return 1;
+        }
+
         // Write VTK output
-        std::string outDir = config.get<std::string>("output.dir", "output");
         VTKWriter writer;
         writer.write(outDir + "/result.vtu",
                      solver.velocity().mesh(),
