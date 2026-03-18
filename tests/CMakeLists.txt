@@ -8,6 +8,7 @@ add_executable(lgflow_tests
     test_config.cpp
     test_logger.cpp
     test_solver_init.cpp
+    test_pressure_solver.cpp
 )
 
 target_link_libraries(lgflow_tests

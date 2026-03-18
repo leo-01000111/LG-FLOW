@@ -153,11 +153,13 @@ Rules:
   - SIMPLE loop (NavierStokesSolver) deferred to Milestone 3 physics scope.
   - Lid-driven cavity validation (Ghia et al. 1982) deferred to Milestone 4.
 
-## 2026-03-18 (Europe/Warsaw) - Phase 4 Boundary Conditions + Case Mapping
+## 2026-03-18 23:00 (Europe/Warsaw) - Phase 4 Boundary Conditions + Case Mapping
 - Author: Claude Code
 - Status: local-uncommitted
-- Metadata correction: Phase 2 (Mesh Geometry Core) was committed as `6136e80`; the
+- Metadata correction: Phase 2 (Mesh Geometry Core) was committed as `6136e80`;
   Phase 2 HISTORY entry incorrectly listed status as "local-uncommitted".
+  Phase 3 was committed as `4e2b956`; Phase 3 HISTORY entry also listed "local-uncommitted".
+  Phase 4 title line previously omitted HH:MM time — corrected to 23:00.
 - Summary:
   - Implemented `BoundaryCondition::applyVelocity`: Dirichlet assignment for WALL/INLET
     patches; zero-gradient (no-op) for OUTLET/SYMMETRY. Patches applied in order
@@ -197,7 +199,59 @@ Rules:
   - SYMMETRY BC velocity logic (zero normal component only) is currently a no-op; a
     correct SYMMETRY implementation requires knowing which normal component to zero,
     which is patch-geometry information not yet exposed in the interface.
-  - `PressureSolver::solve()` and `NavierStokesSolver::step()` remain STUB — Milestone 3
-    SIMPLE loop scope.
+  - `NavierStokesSolver::step()` remains STUB — full SIMPLE loop deferred to next phase.
+  - `VTKWriter::write()` still STUB — needed for ParaView output (Milestone 2 remainder).
+  - Lid-driven cavity validation (Ghia et al. 1982) deferred to Milestone 4.
+
+## 2026-03-18 23:30 (Europe/Warsaw) - Phase 5 Pressure Solver Infrastructure
+- Author: Claude Code
+- Status: local-uncommitted
+- Metadata correction:
+  - Phase 3 was committed as `4e2b956`; Phase 3 HISTORY entry incorrectly listed "local-uncommitted".
+  - Phase 4 title line previously omitted HH:MM time; corrected to 23:00.
+- Summary:
+  - Implemented `PressureSolver::solve()` — replaces STUB with a full sparse Poisson solve.
+  - Input validation: throws `std::invalid_argument` for dt≤0, rho≤0, αp∉(0,1], or mesh
+    pointer mismatch on either field argument.
+  - RHS: b_i = −(ρ/dt) · divergence(u*)_i · V_i using `Discretization::divergence`.
+    Sign is negative because the assembled matrix A is positive-definite (a_f = area/dist on
+    diagonal), making (A p')[o] = −Laplacian(p') · V_o; the negative sign yields the correct
+    Poisson equation ∇²p' = (ρ/dt)·div(u*). Reference: Patankar (1980) eq. 6.28.
+  - Matrix assembly: symmetric 5-point Laplacian stencil over all interior faces;
+    a_f = getFaceArea / |centre_n − centre_o|; boundary faces skipped (zero-gradient BC).
+    Reference: Ferziger, Perić & Street, 4th ed., eq. 7.23.
+  - Singularity fix: row 0 set to identity (reference cell p'[0] = 0); BiCGSTAB tolerates
+    the resulting asymmetric row; column-0 coupling in other rows is harmless since x[0]=0.
+  - Solver: `Eigen::BiCGSTAB<SparseMatrix<double>>`; throws `std::runtime_error` on
+    non-convergence or non-finite solution/residual.
+  - Corrections: pressure += αp · p'; velocity -= (dt/ρ) · gradient(p') via
+    `Discretization::gradient`. Reference: Patankar (1980) eqs. 6.30–6.31.
+  - Return value: `||A x − b||_2` (solver residual norm).
+  - Added `tests/test_pressure_solver.cpp` with 7 tests (104 total from 97):
+    `Solve_InvalidDt_Throws`, `Solve_InvalidRho_Throws`, `Solve_InvalidAlphaP_Throws`,
+    `Solve_MeshMismatch_Throws`, `Solve_ZeroVelocity_LeavesFieldsNearUnchanged_ResidualNearZero`,
+    `Solve_NonZeroDivergence_ReturnsFiniteResidual_UpdatesPressure`,
+    `Solve_NonZeroDivergence_ReducesDivergenceNorm`.
+  - Added `test_pressure_solver.cpp` to `tests/CMakeLists.txt`.
+- Files changed:
+  - `src/solver/PressureSolver.cpp`
+  - `tests/test_pressure_solver.cpp` (new)
+  - `tests/CMakeLists.txt`
+  - `HISTORY.md` (metadata corrections to Phases 3–4 + this entry)
+- Validation:
+  - `C:\Program Files\CMake\bin\cmake.exe --build build --config Debug`
+  - Build succeeded (`flowcore_lib`, `lgflow`, `lgflow_tests`), zero warnings, zero errors.
+  - `C:\Program Files\CMake\bin\ctest.exe --test-dir build -C Debug --output-on-failure`
+  - Result: 104/104 tests passed (3.88 s).
+- Risks/TODOs:
+  - Velocity correction uses `Discretization::gradient` (Gauss face-average), which is not
+    perfectly consistent with the two-point-stencil Laplacian matrix. Divergence reduction is
+    achieved in practice (verified by test) but not algebraically exact. A future improvement
+    is to use a face-by-face velocity correction matching the Poisson stencil.
+  - Reference-cell fix (row-0 identity) makes A asymmetric; BiCGSTAB handles this but
+    ConjugateGradient cannot be used. When the SIMPLE loop is live, consider a symmetric
+    Dirichlet pin (also zero out column 0) if a symmetric solver is preferred.
+  - `NavierStokesSolver::step()` SIMPLE sequence (momentum predictor + pressure correction +
+    velocity correction + BC apply + repeat) remains STUB — next phase scope.
   - `VTKWriter::write()` still STUB — needed for ParaView output (Milestone 2 remainder).
   - Lid-driven cavity validation (Ghia et al. 1982) deferred to Milestone 4.
