@@ -107,3 +107,48 @@ Rules:
   - `Discretization` operators (divergence, gradient, laplacian) still STUB — Milestone 3 scope.
   - `BoundaryCondition::applyVelocity/applyPressure` still STUB — Milestone 3 scope.
   - Lid-driven cavity validation (Ghia et al. 1982) deferred to Milestone 4.
+
+## 2026-03-18 23:59 (Europe/Warsaw) - Phase 3 Field Algebra + Core Discretization Operators
+- Author: Claude Code
+- Status: local-uncommitted
+- Summary:
+  - Implemented `Field<T>::norm()` using `if constexpr` to branch on scalar vs. vector type:
+    scalar: `sqrt(Σ v²)`, vector: `sqrt(Σ |v|²)`. Added `<cmath>` and `<type_traits>` includes.
+  - Implemented `Field<T>::operator+` with mesh-pointer identity check; throws `std::invalid_argument`
+    on mismatch. Element-wise addition via direct `m_data` access.
+  - Implemented `Field<T>::operator*` as element-wise scalar multiplication (works for both
+    `double` and `Eigen::Vector2d` via Eigen's scalar overload).
+  - Implemented `Discretization::divergence` — Gauss theorem, ∇·u ≈ (1/V) Σ_f (u_f·n_f) A_f.
+    Central differencing on interior faces; zero-gradient closure on boundary faces.
+  - Implemented `Discretization::gradient` — Gauss theorem, ∇φ ≈ (1/V) Σ_f φ_f n_f A_f.
+    Same face treatment as divergence.
+  - Implemented `Discretization::laplacian` — compact two-point stencil, ∇²φ ≈ (1/V) Σ_f (∂φ/∂n) A_f.
+    Normal gradient: `(φ_n − φ_o) / d` where `d = (x_n − x_o)·n`. Throws on d ≤ 0.
+    Boundary faces contribute zero (zero normal gradient assumption).
+  - All three operators throw `std::invalid_argument` on mesh pointer mismatch.
+  - Replaced all placeholder assertions in `test_field.cpp`; added 5 new tests
+    (VectorField_Norm, OperatorPlus, OperatorMultiply, MeshMismatch_Throws, VectorField_SetAndGet upgraded).
+  - Created `tests/test_discretization.cpp` with 10 tests covering all three operators
+    and all three mismatch cases.
+  - Added `test_discretization.cpp` to `tests/CMakeLists.txt`.
+  - Test count grew from 77 to 91; all 91 pass.
+- Files changed:
+  - `src/core/Field.hpp`
+  - `src/solver/Discretization.cpp`
+  - `tests/test_field.cpp`
+  - `tests/test_discretization.cpp` (new)
+  - `tests/CMakeLists.txt`
+- Validation:
+  - `C:\Program Files\CMake\bin\cmake.exe --build build --config Debug`
+  - Build succeeded (`flowcore_lib`, `lgflow`, `lgflow_tests`), zero warnings, zero errors.
+  - `C:\Program Files\CMake\bin\ctest.exe --test-dir build -C Debug --output-on-failure`
+  - Result: 91/91 tests passed (2.52 s).
+- Risks/TODOs:
+  - `Field<T>` arithmetic only verified for `double` and `Eigen::Vector2d`; other T types untested.
+  - Boundary-face zero-gradient closure for divergence/gradient gives first-order accuracy at walls;
+    will need proper BC injection (ghost cells or flux override) when `BoundaryCondition` is implemented.
+  - `laplacian` d ≤ 0 check is a safety guard; on a valid uniform mesh this path is unreachable.
+  - `VTKWriter::write()` and `MeshReader::read()` still STUB — Milestone 2 remainder.
+  - `BoundaryCondition::applyVelocity/applyPressure` still STUB — needed before SIMPLE loop.
+  - SIMPLE loop (NavierStokesSolver) deferred to Milestone 3 physics scope.
+  - Lid-driven cavity validation (Ghia et al. 1982) deferred to Milestone 4.

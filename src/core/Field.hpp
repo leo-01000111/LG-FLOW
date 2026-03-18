@@ -3,7 +3,9 @@
 #include "core/Mesh.hpp"
 
 #include <Eigen/Dense>
+#include <cmath>
 #include <stdexcept>
+#include <type_traits>
 #include <vector>
 
 /**
@@ -147,22 +149,39 @@ void Field<T>::setAll(const T& value)
 template <typename T>
 double Field<T>::norm() const
 {
-    // STUB: L2 norm will be implemented in Milestone 2
-    return 0.0;
+    // L2 norm: sqrt(Σ v²) for scalar, sqrt(Σ |v|²) for vector
+    double sum = 0.0;
+    for (const auto& v : m_data)
+    {
+        if constexpr (std::is_same_v<T, double>)
+            sum += v * v;
+        else
+            sum += v.squaredNorm();
+    }
+    return std::sqrt(sum);
 }
 
 template <typename T>
 Field<T> Field<T>::operator+(const Field<T>& other) const
 {
-    // STUB: element-wise addition will be implemented in Milestone 2
-    return Field<T>(*m_mesh);
+    if (m_mesh != other.m_mesh || size() != other.size())
+        throw std::invalid_argument(
+            "Field::operator+: fields must be on the same mesh with equal size");
+    Field<T> result(*m_mesh);
+    const std::size_t n = m_data.size();
+    for (std::size_t k = 0; k < n; ++k)
+        result.m_data[k] = m_data[k] + other.m_data[k];
+    return result;
 }
 
 template <typename T>
-Field<T> Field<T>::operator*(double /*scalar*/) const
+Field<T> Field<T>::operator*(double scalar) const
 {
-    // STUB: scalar multiplication will be implemented in Milestone 2
-    return Field<T>(*m_mesh);
+    Field<T> result(*m_mesh);
+    const std::size_t n = m_data.size();
+    for (std::size_t k = 0; k < n; ++k)
+        result.m_data[k] = m_data[k] * scalar;
+    return result;
 }
 
 template <typename T>

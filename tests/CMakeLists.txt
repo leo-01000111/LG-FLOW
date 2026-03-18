@@ -3,6 +3,7 @@ find_package(GTest REQUIRED)
 add_executable(lgflow_tests
     test_mesh.cpp
     test_field.cpp
+    test_discretization.cpp
     test_bc.cpp
     test_config.cpp
     test_logger.cpp

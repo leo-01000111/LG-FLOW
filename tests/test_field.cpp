@@ -2,9 +2,8 @@
 #include "core/Mesh.hpp"
 
 #include <Eigen/Dense>
+#include <cmath>
 #include <gtest/gtest.h>
-
-// ── Milestone 2 will replace these stubs with real assertions ────────────────
 
 namespace
 {
@@ -17,10 +16,6 @@ Mesh make4x4Mesh()
 }
 }  // namespace
 
-/**
- * When implemented: Field<double> constructed on a mesh should have
- * size() == mesh.numCells().
- */
 TEST(Field, ScalarField_Size_EqualsNumCells)
 {
     Mesh mesh = make4x4Mesh();
@@ -28,52 +23,76 @@ TEST(Field, ScalarField_Size_EqualsNumCells)
     EXPECT_EQ(f.size(), mesh.numCells());
 }
 
-/**
- * When implemented: setAll(v) should make every cell equal to v.
- */
 TEST(Field, ScalarField_SetAll_FillsAllCells)
 {
     Mesh mesh = make4x4Mesh();
     Field<double> f(mesh);
     f.setAll(3.14);
-    // TODO(Milestone 2): for every cell, EXPECT_NEAR(f[i], 3.14, 1e-12)
-    EXPECT_TRUE(true);
+    for (int k = 0; k < f.size(); ++k)
+        EXPECT_NEAR(f[k], 3.14, 1e-12);
 }
 
-/**
- * When implemented: operator()(i,j) should be consistent with operator[].
- */
 TEST(Field, ScalarField_IndexConsistency_TwoDAndLinear)
 {
     Mesh mesh = make4x4Mesh();
     Field<double> f(mesh, 0.0);
     f(1, 2) = 7.0;
-    // TODO(Milestone 2): EXPECT_NEAR(f[mesh.cellIndex(1,2)], 7.0, 1e-12)
-    EXPECT_TRUE(true);
+    EXPECT_NEAR(f[mesh.cellIndex(1, 2)], 7.0, 1e-12);
+    EXPECT_NEAR(f[mesh.cellIndex(0, 0)], 0.0, 1e-12);
 }
 
-/**
- * When implemented: norm() of a uniform field of value v on N cells should
- * equal v * sqrt(N).
- */
 TEST(Field, ScalarField_Norm_UniformField)
 {
     Mesh mesh = make4x4Mesh();
     Field<double> f(mesh, 1.0);
-    // TODO(Milestone 2): EXPECT_NEAR(f.norm(), std::sqrt(16.0), 1e-12)
-    EXPECT_TRUE(true);
+    // 16 cells each with value 1.0: norm = sqrt(16 * 1^2) = 4
+    EXPECT_NEAR(f.norm(), std::sqrt(16.0), 1e-12);
 }
 
-/**
- * When implemented: Field<Eigen::Vector2d> should store and retrieve 2D vectors.
- */
+TEST(Field, VectorField_Norm_UniformField)
+{
+    Mesh mesh = make4x4Mesh();
+    // |v|^2 = 3^2 + 4^2 = 25  →  norm = sqrt(16 * 25) = 20
+    Field<Eigen::Vector2d> f(mesh, Eigen::Vector2d(3.0, 4.0));
+    EXPECT_NEAR(f.norm(), std::sqrt(16.0 * 25.0), 1e-12);
+}
+
+TEST(Field, ScalarField_OperatorPlus_SumIsCorrect)
+{
+    Mesh mesh = make4x4Mesh();
+    Field<double> a(mesh, 2.0);
+    Field<double> b(mesh, 3.0);
+    Field<double> c = a + b;
+    for (int k = 0; k < c.size(); ++k)
+        EXPECT_NEAR(c[k], 5.0, 1e-12);
+}
+
+TEST(Field, ScalarField_OperatorMultiply_ScaledIsCorrect)
+{
+    Mesh mesh = make4x4Mesh();
+    Field<double> f(mesh, 4.0);
+    Field<double> g = f * 2.5;
+    for (int k = 0; k < g.size(); ++k)
+        EXPECT_NEAR(g[k], 10.0, 1e-12);
+}
+
+TEST(Field, ScalarField_OperatorPlus_MeshMismatch_Throws)
+{
+    Mesh mesh1 = make4x4Mesh();
+    Mesh mesh2 = make4x4Mesh();
+    Field<double> a(mesh1, 1.0);
+    Field<double> b(mesh2, 1.0);
+    EXPECT_THROW(static_cast<void>(a + b), std::invalid_argument);
+}
+
 TEST(Field, VectorField_SetAndGet_PreservesVector)
 {
     Mesh mesh = make4x4Mesh();
     Field<Eigen::Vector2d> f(mesh, Eigen::Vector2d::Zero());
     Eigen::Vector2d v(1.0, 2.0);
     f(0, 0) = v;
-    // TODO(Milestone 2): EXPECT_NEAR(f(0,0).x(), 1.0, 1e-12)
-    //                    EXPECT_NEAR(f(0,0).y(), 2.0, 1e-12)
-    EXPECT_TRUE(true);
+    EXPECT_NEAR(f(0, 0).x(), 1.0, 1e-12);
+    EXPECT_NEAR(f(0, 0).y(), 2.0, 1e-12);
+    // Other cells remain zero
+    EXPECT_NEAR(f(1, 0).norm(), 0.0, 1e-12);
 }
