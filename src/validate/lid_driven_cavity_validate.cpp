@@ -223,8 +223,8 @@ int main(int argc, char* argv[])
         Config cfg;
         cfg.load(cfgPath);
 
-        // Determine iteration count: CLI arg overrides config, both capped
-        // at 200 by default for CI speed. Pass a large CLI arg for full runs.
+        // Determine iteration count: CLI arg overrides config; default cap is
+        // 500 iterations. Pass a larger CLI arg for extended runs.
         const int cfgMaxIter = cfg.get<int>("solver.max_iter", 500);
         const int maxIter    = (argc >= 3)
                                 ? std::stoi(argv[2])
@@ -283,13 +283,19 @@ int main(int argc, char* argv[])
         // Load reference data and compute error metrics
         const std::string refPath =
             "cases/lid_driven_cavity/ghia1982_re100.csv";
-        const auto refs = loadReference(refPath);
+        const auto refs      = loadReference(refPath);
+        const bool refAvail  = !refs.empty();
+
+        // NaN sentinel: written to metrics CSV when reference is not available.
+        const double kNaN = std::numeric_limits<double>::quiet_NaN();
 
         ErrorMetrics uErr, vErr;
 
-        if (refs.empty())
+        if (!refAvail)
         {
             std::cout << "Ref     : not found (" << refPath << ")\n";
+            std::cout << "[INFO] Reference absent — error metrics written as nan.\n";
+            // Leave uErr/vErr at default (will be overridden by kNaN below).
         }
         else
         {
@@ -303,11 +309,11 @@ int main(int argc, char* argv[])
             std::cout << "v-line  : L2=" << vErr.l2
                       << "  Linf=" << vErr.linf
                       << "  (n=" << vErr.n << ")\n";
-            std::cout << "[INFO] Metrics are informational — no pass/fail"
-                         " threshold enforced.\n";
         }
 
         // Write validation_metrics.csv — machine-readable summary.
+        // Error columns are 'nan' when reference data is absent so consumers
+        // can distinguish "zero error" from "no comparison performed".
         {
             const std::string metricsPath = outDir + "/validation_metrics.csv";
             std::ofstream     mout(metricsPath);
@@ -317,14 +323,71 @@ int main(int argc, char* argv[])
 
             mout << std::scientific << std::setprecision(8);
             mout << "metric,value\n";
+            mout << "ref_available,"       << (refAvail ? 1 : 0)           << "\n";
             mout << "final_vel_residual,"  << solver.velocityResidual()    << "\n";
             mout << "final_cont_residual," << solver.continuityResidual()  << "\n";
-            mout << "u_l2,"               << uErr.l2                      << "\n";
-            mout << "u_linf,"             << uErr.linf                     << "\n";
-            mout << "v_l2,"               << vErr.l2                      << "\n";
-            mout << "v_linf,"             << vErr.linf                     << "\n";
+            mout << "u_l2,"               << (refAvail ? uErr.l2   : kNaN) << "\n";
+            mout << "u_linf,"             << (refAvail ? uErr.linf : kNaN) << "\n";
+            mout << "v_l2,"               << (refAvail ? vErr.l2   : kNaN) << "\n";
+            mout << "v_linf,"             << (refAvail ? vErr.linf : kNaN) << "\n";
             mout << "iterations,"         << actualIter                    << "\n";
             std::cout << "Metrics : " << metricsPath << "\n";
+        }
+
+        // ── Optional pass/fail thresholds ──────────────────────────────────
+        // If validation.max_u_l2 / max_v_l2 / max_cont_residual are present
+        // in the config and any threshold is exceeded, print a FAIL summary
+        // and return exit code 2.  Keys absent → informational mode only.
+        {
+            bool failMode = cfg.has("validation.max_u_l2")
+                         || cfg.has("validation.max_v_l2")
+                         || cfg.has("validation.max_cont_residual");
+
+            if (failMode)
+            {
+                std::vector<std::string> failures;
+
+                if (cfg.has("validation.max_u_l2") && refAvail)
+                {
+                    const double limit = cfg.get<double>("validation.max_u_l2");
+                    if (uErr.l2 > limit)
+                        failures.push_back(
+                            "u_l2=" + std::to_string(uErr.l2)
+                            + " > max_u_l2=" + std::to_string(limit));
+                }
+                if (cfg.has("validation.max_v_l2") && refAvail)
+                {
+                    const double limit = cfg.get<double>("validation.max_v_l2");
+                    if (vErr.l2 > limit)
+                        failures.push_back(
+                            "v_l2=" + std::to_string(vErr.l2)
+                            + " > max_v_l2=" + std::to_string(limit));
+                }
+                if (cfg.has("validation.max_cont_residual"))
+                {
+                    const double limit = cfg.get<double>("validation.max_cont_residual");
+                    if (solver.continuityResidual() > limit)
+                        failures.push_back(
+                            "cont_residual=" + std::to_string(solver.continuityResidual())
+                            + " > max_cont_residual=" + std::to_string(limit));
+                }
+
+                if (!failures.empty())
+                {
+                    std::cout << "FAIL\n";
+                    for (const auto& f : failures)
+                        std::cout << "  " << f << "\n";
+                    return 2;
+                }
+
+                std::cout << "[INFO] Metrics are informational — no pass/fail"
+                             " threshold enforced.\n";
+            }
+            else
+            {
+                std::cout << "[INFO] Metrics are informational — no pass/fail"
+                             " threshold enforced.\n";
+            }
         }
     }
     catch (const std::exception& e)

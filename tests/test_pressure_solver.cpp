@@ -170,3 +170,47 @@ TEST(PressureSolver, Solve_NonZeroDivergence_ReducesDivergenceNorm)
         << "Divergence norm after pressure correction (" << divNormAfter
         << ") is not less than before (" << divNormBefore << ")";
 }
+
+TEST(PressureSolver, Solve_StencilConsistentCorrection_FiniteOnLargerMesh)
+{
+    // Verifies the inline structured-grid gradient in PressureSolver::solve
+    // (which replaces the generic Discretization::gradient loop) produces a
+    // finite, non-negative solver residual on a 6x6 mesh, exercising boundary,
+    // interior, and corner cell paths.
+    //
+    // Note: divergence reduction is NOT checked here because the reference-cell
+    // pin (p'[0]=0) means the Poisson equation does not drive divergence at
+    // cell (0,0) to zero; whether the L2-norm decreases depends on the p'
+    // profile. Divergence reduction is covered by the 4x4 test above.
+    Mesh mesh;
+    mesh.load(6, 6, 1.0, 1.0);
+    PressureSolver solver(mesh);
+
+    Field<Eigen::Vector2d> vel(mesh, Eigen::Vector2d::Zero());
+    Field<double>          p(mesh, 0.0);
+
+    for (int i = 0; i < mesh.Nx(); ++i)
+        for (int j = 0; j < mesh.Ny(); ++j)
+        {
+            const Eigen::Vector2d c = mesh.getCellCenter(i, j);
+            vel(i, j) = Eigen::Vector2d{c.x(), 0.0};
+        }
+
+    const double res = solver.solve(vel, p, 0.01, 1.0, 0.5);
+
+    // Solver must produce a finite, non-negative residual.
+    EXPECT_TRUE(std::isfinite(res));
+    EXPECT_GE(res, 0.0);
+
+    // Pressure must be updated (non-trivial correction).
+    double pNorm = 0.0;
+    for (int k = 0; k < mesh.numCells(); ++k)
+        pNorm += p[k] * p[k];
+    EXPECT_GT(std::sqrt(pNorm), 1e-8)
+        << "Pressure was not updated on 6x6 mesh";
+
+    // Velocity must remain finite everywhere.
+    for (int k = 0; k < mesh.numCells(); ++k)
+        EXPECT_TRUE(vel[k].allFinite())
+            << "Velocity became non-finite at cell " << k;
+}

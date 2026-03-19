@@ -132,7 +132,8 @@ public:
      *
      * May be smaller than the user-supplied dt when the CFL safety clamp
      * reduces the step to satisfy the convective or diffusive stability limit.
-     * Returns 0.0 before the first call to step() or run().
+     * Returns the configured dt before the first call to step() or run()
+     * (initialised to solver.dt in the constructor).
      *
      * @return dt_eff = min(dt, max_cfl_conv*h/||u||, max_cfl_diff*h²/ν)
      */
@@ -173,6 +174,7 @@ private:
     ConvectionScheme m_convScheme{ConvectionScheme::UPWIND}; ///< Convection scheme
     double           m_maxCflConv{0.5};     ///< Max convective CFL for dt clamp
     double           m_maxCflDiff{0.5};     ///< Max diffusive CFL for dt clamp
+    int              m_pressureCorrectionsPerStep{1}; ///< Pressure-correction passes per SIMPLE step
 
     // ── Runtime state (valid only after initialize()) ─────────────────────────
     bool   m_initialized{false};

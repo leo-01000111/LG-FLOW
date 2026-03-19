@@ -32,6 +32,7 @@ double PressureSolver::solve(Field<Eigen::Vector2d>& velocityField,
         throw std::invalid_argument("PressureSolver::solve: pressureField mesh mismatch");
 
     const int N  = m_mesh->numCells();
+    const int Nx = m_mesh->Nx();
     const int Ny = m_mesh->Ny();
 
     // --- Step 1: Build RHS source term ---
@@ -147,12 +148,59 @@ double PressureSolver::solve(Field<Eigen::Vector2d>& velocityField,
     for (int cellId = 0; cellId < N; ++cellId)
         pressureField[cellId] += alphaP * pPrime[cellId];
 
-    // --- Step 8: Correct velocity ---
-    // u ← u* − (dt/ρ) ∇p'   (central differencing; Patankar 1980, eq. 6.31)
-    const Field<Eigen::Vector2d> gradP = Discretization::gradient(pPrime, *m_mesh);
-    const double coeff = dt / rho;
-    for (int cellId = 0; cellId < N; ++cellId)
-        velocityField[cellId] -= coeff * gradP[cellId];
+    // --- Step 8: Correct velocity (stencil-consistent structured-grid gradient) ---
+    // u ← u* − (dt/ρ) ∇p'
+    //
+    // Replaces the generic Discretization::gradient (which iterates over the
+    // face list) with an equivalent inline computation on the structured grid.
+    // This avoids repeated face-list traversal and makes the stencil explicit:
+    //
+    //   Interior cells (both neighbours exist): central difference
+    //     ∂p'/∂x ≈ (p'[i+1,j] − p'[i-1,j]) / (2·dx)
+    //   Boundary cells (one neighbour missing): zero-gradient closure
+    //     face value = cell value → same half-difference as Gauss theorem gives
+    //     ∂p'/∂x|_{i=0}   ≈ (p'[1,j]   − p'[0,j]) / (2·dx)
+    //     ∂p'/∂x|_{i=Nx-1}≈ (p'[Nx-1,j]− p'[Nx-2,j]) / (2·dx)
+    //
+    // This is algebraically identical to Discretization::gradient but avoids the
+    // general face-iteration overhead and keeps the stencil readable.
+    // Reference: Patankar (1980) eq. 6.31; Ferziger & Peric (2020) eq. 4.22.
+    {
+        const double coeff = dt / rho;
+        // Derive uniform cell spacing from the first cell centre.
+        // For a uniform grid spanning [0, Lx]: centre(0,0) = (dx/2, dy/2).
+        const double dx = 2.0 * m_mesh->getCellCenter(0, 0).x();
+        const double dy = 2.0 * m_mesh->getCellCenter(0, 0).y();
+
+        for (int cellId = 0; cellId < N; ++cellId)
+        {
+            const int i = cellId / Ny;
+            const int j = cellId % Ny;
+
+            // x-gradient: central for interior cells, zero-gradient closure
+            // at boundaries (boundary face value = cell centre value).
+            double gradX = 0.0;
+            if (Nx > 1)
+            {
+                // Boundary: face value p'_boundary = p'_cell → half-diff
+                const double pL = (i > 0)      ? pPrime[(i - 1) * Ny + j] : pPrime[cellId];
+                const double pR = (i < Nx - 1) ? pPrime[(i + 1) * Ny + j] : pPrime[cellId];
+                gradX = (pR - pL) / (2.0 * dx);
+            }
+
+            // y-gradient: same pattern, y-direction.
+            double gradY = 0.0;
+            if (Ny > 1)
+            {
+                const double pB = (j > 0)      ? pPrime[i * Ny + j - 1] : pPrime[cellId];
+                const double pT = (j < Ny - 1) ? pPrime[i * Ny + j + 1] : pPrime[cellId];
+                gradY = (pT - pB) / (2.0 * dy);
+            }
+
+            velocityField[cellId].x() -= coeff * gradX;
+            velocityField[cellId].y() -= coeff * gradY;
+        }
+    }
 
     // --- Step 9: Residual ||A x − b||_2 ---
     const Eigen::VectorXd residualVec = A * x - b;

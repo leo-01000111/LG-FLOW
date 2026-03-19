@@ -156,6 +156,13 @@ NavierStokesSolver::NavierStokesSolver(const Config& config)
             "NavierStokesSolver: solver.max_cfl_diff must be > 0 (got "
             + std::to_string(m_maxCflDiff) + ")");
 
+    m_pressureCorrectionsPerStep =
+        config.get<int>("solver.pressure_corrections_per_step", 1);
+    if (m_pressureCorrectionsPerStep < 1)
+        throw std::invalid_argument(
+            "NavierStokesSolver: solver.pressure_corrections_per_step must be >= 1 (got "
+            + std::to_string(m_pressureCorrectionsPerStep) + ")");
+
     // Initialise m_dtEff to the configured dt; updated by each step() call.
     m_dtEff = m_dt;
 
@@ -324,9 +331,15 @@ void NavierStokesSolver::step(double dt)
 
     // ── 2. Pressure correction ────────────────────────────────────────────────
     // PressureSolver::solve updates uStar and m_pressure in place.
+    // Additional passes (solver.pressure_corrections_per_step > 1) drive the
+    // continuity residual lower within a single SIMPLE step at the cost of
+    // extra Poisson solves. The final pass residual is stored.
     // Reference: Patankar (1980) eqs. 6.28–6.31.
-    m_pressureResidual = m_pressureSolver->solve(
-        uStar, m_pressure.value(), m_dtEff, m_rho, m_alphaP);
+    for (int pc = 0; pc < m_pressureCorrectionsPerStep; ++pc)
+    {
+        m_pressureResidual = m_pressureSolver->solve(
+            uStar, m_pressure.value(), m_dtEff, m_rho, m_alphaP);
+    }
 
     // ── 3. Velocity under-relaxation ──────────────────────────────────────────
     // u^{k+1} = α_u · u* + (1 - α_u) · u^k

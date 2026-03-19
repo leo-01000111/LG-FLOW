@@ -5,8 +5,8 @@ viscous flow. It is built on the **Finite Volume Method (FVM)** with
 **SIMPLE** (Semi-Implicit Method for Pressure-Linked Equations)
 pressure-velocity coupling.
 
-> **Status:** Phase 8 — upwind convection scheme, CFL safety clamp, and
-> improved validation harness (validation_metrics.csv).
+> **Status:** Phase 9 — stencil-consistent pressure correction, optional
+> multi-pass pressure solver, and machine-usable validation pass/fail mode.
 
 ---
 
@@ -101,13 +101,27 @@ If `cases/lid_driven_cavity/ghia1982_re100.csv` is present (included in repo),
 the executable automatically loads it and reports L2 and Linf error metrics
 against Ghia et al. (1982) Re=100 data. Metrics are informational only.
 
-**New config keys (Phase 8):**
+**Config keys (Phase 8–9):**
 
 | Key | Default | Description |
 |---|---|---|
 | `solver.convection_scheme` | `upwind` | Convection discretization: `upwind` (donor-cell, 1st order, stable) or `central` (Gauss, 2nd order) |
 | `solver.max_cfl_conv` | `0.5` | Max convective CFL number; clamps dt to `max_cfl_conv * h / ||u||_max` |
 | `solver.max_cfl_diff` | `0.5` | Max diffusive CFL number; clamps dt to `max_cfl_diff * h² / ν` |
+| `solver.pressure_corrections_per_step` | `1` | Number of pressure-correction Poisson solves per SIMPLE step (≥ 1). Values > 1 drive the continuity residual lower within each step at the cost of extra linear solves. |
+| `validation.max_u_l2` | *(absent)* | If set, exit code 2 is returned when the u-centerline L2 error exceeds this value. Requires reference CSV to be present. |
+| `validation.max_v_l2` | *(absent)* | If set, exit code 2 is returned when the v-centerline L2 error exceeds this value. Requires reference CSV to be present. |
+| `validation.max_cont_residual` | *(absent)* | If set, exit code 2 is returned when the final continuity residual exceeds this value. |
+
+**Validation executable exit codes:**
+
+| Code | Meaning |
+|---|---|
+| `0` | Run completed (thresholds absent or all passed) |
+| `1` | Fatal error (config missing, solver exception, etc.) |
+| `2` | One or more validation thresholds exceeded (pass/fail mode) |
+
+When threshold keys are absent `validation_metrics.csv` is still always written. Error columns (`u_l2`, `u_linf`, `v_l2`, `v_linf`) are written as `nan` when the reference CSV is not found.
 
 ---
 

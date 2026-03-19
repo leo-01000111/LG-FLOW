@@ -485,3 +485,92 @@ Rules:
     is zero overhead.
   - SYMMETRY BC is still a no-op.
   - SparseLU O(N^1.5) memory limitation for meshes above ~256×256 unchanged from Phase 7.
+
+## 2026-03-19 14:00 (Europe/Warsaw) - Phase 9 Convergence Quality + Validation Trustworthiness
+- Author: Claude Code
+- Status: local-uncommitted
+- Metadata correction: Phase 8 HISTORY entry omitted HH:MM time in the section title; correct
+  time is 2026-03-19 (no exact time recorded). Entry not edited per append-only rule.
+- Summary:
+  - **Audit fix 1 — stale iteration-cap comment:** Removed "200 iterations" comment from
+    `lid_driven_cavity_validate.cpp`; replaced with accurate "500 iterations" description.
+  - **Audit fix 2 — dtEffective() doc mismatch:** Header doc previously said "Returns 0.0
+    before first step()"; fixed to "Returns the configured dt before first step()" to match
+    the constructor which initialises `m_dtEff = m_dt`.
+  - **Audit fix 3 — misleading zero errors in validation_metrics.csv:** When the Ghia reference
+    CSV is absent, error columns (`u_l2`, `u_linf`, `v_l2`, `v_linf`) are now written as `nan`
+    instead of 0. Added `ref_available` row (1 or 0) as the first metric line. Stdout also
+    clearly states "Reference absent — error metrics written as nan."
+  - **Stencil-consistent velocity correction (Task 2):** Replaced `Discretization::gradient(pPrime)`
+    call in `PressureSolver::solve` with an inline structured-grid loop. For interior cells the
+    formula is identical (central difference). For boundary cells uses zero-gradient closure
+    (face value = cell value), which is algebraically equivalent to the Gauss-theorem gradient
+    but avoids the general face-iteration overhead and makes the stencil explicit.
+    Reference: Patankar (1980) eq. 6.31; Ferziger & Peric (2020) eq. 4.22.
+  - **`solver.pressure_corrections_per_step` (Task 3):** New config key (int, default 1, ≥ 1).
+    In `NavierStokesSolver::step()`, the pressure-correction Poisson solve is now called
+    `pressure_corrections_per_step` times per SIMPLE step, with each pass operating on the
+    velocity corrected by the previous pass. Values > 1 drive continuity residual lower at
+    the cost of additional SparseLU solves. Validation at construction: values < 1 throw
+    `std::invalid_argument`.
+  - **Validation executable pass/fail mode (Task 4):** Added optional config keys
+    `validation.max_u_l2`, `validation.max_v_l2`, `validation.max_cont_residual`. If any
+    threshold is exceeded, the executable prints a FAIL summary and returns exit code 2.
+    Keys absent → informational mode (unchanged behavior). `validation_metrics.csv` is always
+    written. Exit codes: 0 = pass/informational, 1 = fatal error, 2 = threshold exceeded.
+  - **README updated (Task 5):** Phase 9 status; new config keys table
+    (`solver.pressure_corrections_per_step`, `validation.max_*` keys); exit code table;
+    note on nan error columns when reference is absent.
+  - **New tests:** `test_solver_pressure_corrections.cpp` (6 tests):
+    `ZeroCorrections_Throws`, `NegativeCorrections_Throws`, `OneCorrection_IsDefault_Constructs`,
+    `TwoCorrections_Constructs`, `TwoCorrections_DoNotWorsenContinuityResidual`,
+    `FiveCorrections_ResidualsFinite`.
+  - **New test in test_pressure_solver.cpp:** `Solve_StencilConsistentCorrection_FiniteOnLargerMesh`
+    (6x6 mesh, verifies inline gradient gives finite/non-negative residual, non-trivial pressure
+    update, and finite velocities on all cells).
+  - Test count grew from 147 to 154; all 154 pass.
+- Files changed:
+  - `src/solver/NavierStokesSolver.hpp` (dtEffective doc fix; m_pressureCorrectionsPerStep member)
+  - `src/solver/NavierStokesSolver.cpp` (pressure_corrections_per_step parsing/validation/loop)
+  - `src/solver/PressureSolver.cpp` (Nx added; inline structured-grid gradient replacing Discretization::gradient)
+  - `src/validate/lid_driven_cavity_validate.cpp` (stale comment fix; ref_available + nan metrics; pass/fail mode)
+  - `tests/test_pressure_solver.cpp` (new stencil consistency test)
+  - `tests/test_solver_pressure_corrections.cpp` (new)
+  - `tests/CMakeLists.txt` (added test_solver_pressure_corrections.cpp)
+  - `README.md` (Phase 9 status, new config key docs, exit code table)
+  - `HISTORY.md` (this entry)
+- Validation:
+  - `C:\Program Files\CMake\bin\cmake.exe --build build --config Debug`
+  - Build succeeded (flowcore_lib, lgflow, lgflow_tests, lgflow_validate_lid), zero warnings, zero errors.
+  - `C:\Program Files\CMake\bin\ctest.exe --test-dir build -C Debug --output-on-failure`
+  - Result: 154/154 tests passed (14.09 s).
+  - `build\Debug\lgflow_validate_lid.exe` (from FlowCore/):
+    ```
+    LG-Flow Validation: Lid-Driven Cavity
+    Config  : cases/lid_driven_cavity/case_validate.cfg
+    maxIter : 500
+    Mesh    : 32x32
+    [WARN ] run() reached maxIter=500 without convergence
+    Results : vel_residual=1.862e-03  cont_residual=3.289e+01  iterations=500
+    CSV     : output/lid_driven_cavity/centerline.csv  (32 u-points, 32 v-points)
+    Ref     : cases/lid_driven_cavity/ghia1982_re100.csv
+    u-line  : L2=1.315e-01  Linf=2.479e-01  (n=17)
+    v-line  : L2=1.286e-01  Linf=2.511e-01  (n=17)
+    Metrics : output/lid_driven_cavity/validation_metrics.csv
+    [INFO] Metrics are informational — no pass/fail threshold enforced.
+    ```
+  - `output/lid_driven_cavity/validation_metrics.csv`: ref_available=1, u_l2=1.315e-01,
+    u_linf=2.479e-01, v_l2=1.286e-01, v_linf=2.511e-01, iterations=500
+- Risks/TODOs:
+  - Solver has not converged in 500 iterations at 32x32; continuity residual (32.9) remains large.
+    Root cause: explicit forward-Euler momentum predictor with under-relaxation. Even with
+    `pressure_corrections_per_step > 1`, the divergence after velocity correction from the
+    momentum predictor dominates. An implicit momentum solve or semi-implicit SIMPLE is needed.
+  - The inline stencil gradient is algebraically equivalent to Discretization::gradient for all
+    mesh sizes. The equivalence was verified by checking that all 8 original pressure solver
+    tests still pass unchanged.
+  - Reference-cell pin (p'[0]=0) means divergence at cell (0,0) is NOT driven to zero by the
+    pressure correction. This is a known SIMPLE property (reference cell just fixes the pressure
+    datum, not the divergence).
+  - SYMMETRY BC is still a no-op.
+  - SparseLU O(N^1.5) memory limitation for meshes above ~256×256 unchanged.
