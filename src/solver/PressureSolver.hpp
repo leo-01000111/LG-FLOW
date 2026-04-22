@@ -4,6 +4,7 @@
 #include "core/Mesh.hpp"
 
 #include <Eigen/Dense>
+#include <vector>
 
 /**
  * @brief Solves the pressure-correction equation in the SIMPLE algorithm.
@@ -52,6 +53,22 @@ public:
                                double                  rho,
                                double                  alphaP);
 
+    /**
+     * @brief Sets the cells whose pressure correction is pinned to zero (p' = 0).
+     *
+     * For all-wall domains (no outlet), pass an empty vector or {0} — cell 0 is
+     * used as the single reference to fix the pure-Neumann singularity.
+     * For domains with an OUTLET, pass all outlet cell IDs so the pressure
+     * gradient can develop freely between inlet and outlet.
+     *
+     * Must be called before the first solve(). Calling it again reconfigures the
+     * reference without rebuilding the solver.
+     *
+     * @param cells Cell IDs to pin.  Out-of-range IDs are silently ignored.
+     */
+    void setDirichletPressureCells(std::vector<int> cells);
+
 private:
-    const Mesh* m_mesh;
+    const Mesh*      m_mesh;
+    std::vector<int> m_dirichletCells;  ///< Reference cells for Neumann singularity fix
 };

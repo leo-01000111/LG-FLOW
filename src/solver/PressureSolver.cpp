@@ -13,6 +13,11 @@ PressureSolver::PressureSolver(const Mesh& mesh)
 {
 }
 
+void PressureSolver::setDirichletPressureCells(std::vector<int> cells)
+{
+    m_dirichletCells = std::move(cells);
+}
+
 double PressureSolver::solve(Field<Eigen::Vector2d>& velocityField,
                              Field<double>&          pressureField,
                              double                  dt,
@@ -36,10 +41,14 @@ double PressureSolver::solve(Field<Eigen::Vector2d>& velocityField,
     const int Ny = m_mesh->Ny();
 
     // --- Step 1: Build RHS source term ---
-    // b_i = (rho/dt) * divergence(u*)_i * V_i
-    // divergence() returns (1/V) Σ_f (u_f · n_f) A_f; multiply back by V.
-    // Reference: Patankar (1980) eq. 6.28
-    Field<double> divU = Discretization::divergence(velocityField, *m_mesh);
+    // b_i = (rho/dt) * div(u*)_i * V_i
+    //
+    // Face velocities use Rhie-Chow interpolation to prevent checkerboard
+    // pressure oscillations on the collocated grid.  The RC correction adds
+    // sensitivity to the compact face pressure gradient, damping decoupled modes.
+    // Reference: Patankar (1980) eq. 6.28; Rhie & Chow (1983) AIAA J. 21:1525.
+    Field<double> divU =
+        Discretization::divergenceRhieChow(velocityField, pressureField, *m_mesh, dt, rho);
 
     Eigen::VectorXd b(N);
     for (int cellId = 0; cellId < N; ++cellId)
@@ -65,6 +74,19 @@ double PressureSolver::solve(Field<Eigen::Vector2d>& velocityField,
 
     std::vector<double> diag(static_cast<std::size_t>(N), 0.0);
 
+    // Build reference-cell lookup: isRef[c] = true → row c uses identity equation.
+    std::vector<bool> isRef(static_cast<std::size_t>(N), false);
+    if (m_dirichletCells.empty())
+    {
+        isRef[0] = true;  // fallback: pin cell 0 (all-wall / no-outlet case)
+    }
+    else
+    {
+        for (int c : m_dirichletCells)
+            if (c >= 0 && c < N)
+                isRef[static_cast<std::size_t>(c)] = true;
+    }
+
     const int nFaces = m_mesh->numFaces();
     for (int f = 0; f < nFaces; ++f)
     {
@@ -87,23 +109,36 @@ double PressureSolver::solve(Field<Eigen::Vector2d>& velocityField,
         diag[static_cast<std::size_t>(o)] += aF;
         diag[static_cast<std::size_t>(n)] += aF;
 
-        // Skip row-0 off-diagonal: reference cell row is overridden below.
-        // Column-0 coupling in other rows is harmless (x[0] is forced to 0).
-        if (o != 0)
+        // Reference-cell rows use identity equations (added below); skip their
+        // off-diagonal entries.  Column entries to reference cells in other rows
+        // are harmless: the identity row forces p'[ref] = 0 so those terms
+        // contribute zero to the equation of the non-reference neighbour.
+        if (!isRef[static_cast<std::size_t>(o)])
             triplets.emplace_back(o, n, -aF);
-        if (n != 0)
+        if (!isRef[static_cast<std::size_t>(n)])
             triplets.emplace_back(n, o, -aF);
     }
 
-    // Diagonal entries — skip cell 0 (overridden by identity row below)
-    for (int cellId = 1; cellId < N; ++cellId)
-        triplets.emplace_back(cellId, cellId, diag[static_cast<std::size_t>(cellId)]);
-
     // --- Step 3: Fix pure-Neumann singularity ---
-    // Row 0 → identity; b[0] = 0 forces p'[0] = 0 as the reference cell.
-    // BiCGSTAB tolerates the resulting asymmetric row.
-    triplets.emplace_back(0, 0, 1.0);
-    b[0] = 0.0;
+    // Each reference cell r gets an identity row (p'[r] = 0), which pins the
+    // pressure correction at that cell and removes the rank deficiency of the
+    // purely Neumann system.
+    //
+    // For all-wall domains: m_dirichletCells is empty → pin cell 0 (corner).
+    // For domains with OUTLET: pin all outlet cells so the pressure gradient
+    // can develop freely from inlet to outlet.
+    for (int cellId = 0; cellId < N; ++cellId)
+    {
+        if (isRef[static_cast<std::size_t>(cellId)])
+        {
+            triplets.emplace_back(cellId, cellId, 1.0);
+            b[cellId] = 0.0;
+        }
+        else
+        {
+            triplets.emplace_back(cellId, cellId, diag[static_cast<std::size_t>(cellId)]);
+        }
+    }
 
     Eigen::SparseMatrix<double> A(N, N);
     A.setFromTriplets(triplets.begin(), triplets.end());

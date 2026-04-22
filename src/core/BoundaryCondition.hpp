@@ -84,6 +84,21 @@ public:
      */
     void applyPressure(Field<double>& pressureField, const Mesh& mesh) const;
 
+    /**
+     * @brief Returns the cell IDs of all boundary cells belonging to patches of a given type.
+     *
+     * Used by NavierStokesSolver to identify which cells should serve as
+     * Dirichlet reference cells in the pressure-correction Poisson system
+     * (e.g. all OUTLET cells pin p' = 0 so the pressure gradient can develop).
+     *
+     * @param type Boundary type to collect (e.g. BoundaryType::OUTLET).
+     * @param mesh Mesh providing grid dimensions.
+     * @return Sorted, deduplicated vector of cell IDs. Empty if no patch of the
+     *         requested type is registered.
+     */
+    [[nodiscard]] std::vector<int> collectCellsOfType(BoundaryType type,
+                                                      const Mesh&  mesh) const;
+
 private:
     std::unordered_map<std::string, BoundaryPatch> m_patches;
 };

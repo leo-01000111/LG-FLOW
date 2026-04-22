@@ -1,5 +1,6 @@
 #include "core/BoundaryCondition.hpp"
 
+#include <algorithm>
 #include <stdexcept>
 
 void BoundaryCondition::addPatch(const std::string& name, const BoundaryPatch& patch)
@@ -108,4 +109,35 @@ void BoundaryCondition::applyPressure(Field<double>& pressureField,
                 pressureField(i, Ny - 1) = 0.0;
         }
     }
+}
+
+std::vector<int> BoundaryCondition::collectCellsOfType(BoundaryType   type,
+                                                        const Mesh&    mesh) const
+{
+    const int Nx = mesh.Nx();
+    const int Ny = mesh.Ny();
+
+    std::vector<int> cells;
+
+    // Cell ID convention: c = i * Ny + j  (i = x-column, j = y-row)
+    if (auto it = m_patches.find("left"); it != m_patches.end() && it->second.type == type)
+        for (int j = 0; j < Ny; ++j)
+            cells.push_back(0 * Ny + j);
+
+    if (auto it = m_patches.find("right"); it != m_patches.end() && it->second.type == type)
+        for (int j = 0; j < Ny; ++j)
+            cells.push_back((Nx - 1) * Ny + j);
+
+    if (auto it = m_patches.find("bottom"); it != m_patches.end() && it->second.type == type)
+        for (int i = 0; i < Nx; ++i)
+            cells.push_back(i * Ny + 0);
+
+    if (auto it = m_patches.find("top"); it != m_patches.end() && it->second.type == type)
+        for (int i = 0; i < Nx; ++i)
+            cells.push_back(i * Ny + (Ny - 1));
+
+    // Sort and deduplicate (corner cells may appear from two patches).
+    std::sort(cells.begin(), cells.end());
+    cells.erase(std::unique(cells.begin(), cells.end()), cells.end());
+    return cells;
 }

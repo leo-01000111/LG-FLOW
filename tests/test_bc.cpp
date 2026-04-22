@@ -177,3 +177,74 @@ TEST(BoundaryCondition, ApplyPressure_MeshMismatch_Throws)
 
     EXPECT_THROW(bc.applyPressure(p, mesh2), std::invalid_argument);
 }
+
+// ── collectCellsOfType ────────────────────────────────────────────────────────
+
+TEST(BoundaryCondition, CollectCellsOfType_NoPatchOfType_ReturnsEmpty)
+{
+    // No OUTLET patch registered → must return an empty vector.
+    Mesh mesh = makeSquareMesh();  // 8x8
+
+    BoundaryCondition bc;
+    bc.addPatch("top",    {BoundaryType::WALL, Eigen::Vector2d::Zero()});
+    bc.addPatch("bottom", {BoundaryType::WALL, Eigen::Vector2d::Zero()});
+    bc.addPatch("left",   {BoundaryType::INLET, Eigen::Vector2d(1.0, 0.0)});
+
+    const std::vector<int> cells = bc.collectCellsOfType(BoundaryType::OUTLET, mesh);
+    EXPECT_TRUE(cells.empty());
+}
+
+TEST(BoundaryCondition, CollectCellsOfType_RightOutlet_CorrectCellCount)
+{
+    // An 8x8 mesh has Ny=8 cells in the right column → 8 outlet cells.
+    Mesh mesh = makeSquareMesh();  // 8x8, Ny=8
+
+    BoundaryCondition bc;
+    bc.addPatch("right", {BoundaryType::OUTLET, Eigen::Vector2d::Zero()});
+
+    const std::vector<int> cells = bc.collectCellsOfType(BoundaryType::OUTLET, mesh);
+
+    ASSERT_EQ(static_cast<int>(cells.size()), mesh.Ny())
+        << "Expected Ny outlet cells for right OUTLET patch";
+
+    // Cell IDs for right column: (Nx-1)*Ny + j, j in [0, Ny)
+    const int Nx = mesh.Nx();
+    const int Ny = mesh.Ny();
+    for (int j = 0; j < Ny; ++j)
+    {
+        const int expected = (Nx - 1) * Ny + j;
+        EXPECT_NE(std::find(cells.begin(), cells.end(), expected), cells.end())
+            << "Cell (Nx-1, " << j << ") id=" << expected << " not found";
+    }
+}
+
+TEST(BoundaryCondition, CollectCellsOfType_ResultIsSortedAndUnique)
+{
+    // Collecting OUTLET for a single patch must return a sorted, deduplicated list.
+    Mesh mesh = makeSquareMesh();  // 8x8
+
+    BoundaryCondition bc;
+    bc.addPatch("right", {BoundaryType::OUTLET, Eigen::Vector2d::Zero()});
+
+    const std::vector<int> cells = bc.collectCellsOfType(BoundaryType::OUTLET, mesh);
+
+    for (std::size_t k = 1; k < cells.size(); ++k)
+        EXPECT_LT(cells[k - 1], cells[k])
+            << "Result is not strictly sorted at index " << k;
+}
+
+TEST(BoundaryCondition, CollectCellsOfType_LeftInlet_CorrectCellIds)
+{
+    // Left column cells: i=0, j in [0, Ny) → cell ID = 0 * Ny + j = j
+    Mesh mesh = makeSquareMesh();  // 8x8, Ny=8
+
+    BoundaryCondition bc;
+    bc.addPatch("left", {BoundaryType::INLET, Eigen::Vector2d(1.0, 0.0)});
+
+    const std::vector<int> cells = bc.collectCellsOfType(BoundaryType::INLET, mesh);
+
+    ASSERT_EQ(static_cast<int>(cells.size()), mesh.Ny());
+    for (int j = 0; j < mesh.Ny(); ++j)
+        EXPECT_EQ(cells[static_cast<std::size_t>(j)], j)
+            << "Left inlet cell j=" << j << " should have id=" << j;
+}

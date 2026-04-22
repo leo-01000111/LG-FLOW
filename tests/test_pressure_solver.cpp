@@ -171,6 +171,53 @@ TEST(PressureSolver, Solve_NonZeroDivergence_ReducesDivergenceNorm)
         << ") is not less than before (" << divNormBefore << ")";
 }
 
+TEST(PressureSolver, SetDirichletPressureCells_OutletColumn_ProducesFiniteResult)
+{
+    // Pin the right column (outlet) instead of cell 0.
+    // With a non-zero divergence source the solver must still produce a finite,
+    // non-negative residual and update the pressure field.
+    Mesh mesh;
+    mesh.load(4, 4, 1.0, 1.0);  // Nx=4, Ny=4
+    PressureSolver solver(mesh);
+
+    // Pin right column: cells (Nx-1)*Ny + j, j in [0, Ny)
+    const int Nx = mesh.Nx();
+    const int Ny = mesh.Ny();
+    std::vector<int> outletCells;
+    for (int j = 0; j < Ny; ++j)
+        outletCells.push_back((Nx - 1) * Ny + j);
+    solver.setDirichletPressureCells(outletCells);
+
+    // u_x = x → divergence ≈ 1 everywhere (same as the existing physics tests)
+    Field<Eigen::Vector2d> vel(mesh, Eigen::Vector2d::Zero());
+    Field<double>          p(mesh, 0.0);
+    for (int i = 0; i < Nx; ++i)
+        for (int j = 0; j < Ny; ++j)
+        {
+            const Eigen::Vector2d c = mesh.getCellCenter(i, j);
+            vel(i, j) = Eigen::Vector2d{c.x(), 0.0};
+        }
+
+    double residual = 0.0;
+    ASSERT_NO_THROW(residual = solver.solve(vel, p, 0.01, 1.0, 0.5));
+
+    EXPECT_TRUE(std::isfinite(residual));
+    EXPECT_GE(residual, 0.0);
+
+    // Outlet column must remain at p = 0 (reference cells, p' = 0).
+    for (int j = 0; j < Ny; ++j)
+        EXPECT_NEAR(p(Nx - 1, j), 0.0, 1e-10)
+            << "Outlet cell p != 0 at j=" << j;
+
+    // Interior cells must have non-trivial pressure.
+    double pNormInterior = 0.0;
+    for (int i = 0; i < Nx - 1; ++i)
+        for (int j = 0; j < Ny; ++j)
+            pNormInterior += p(i, j) * p(i, j);
+    EXPECT_GT(std::sqrt(pNormInterior), 1e-8)
+        << "Interior pressure was not updated despite non-zero divergence";
+}
+
 TEST(PressureSolver, Solve_StencilConsistentCorrection_FiniteOnLargerMesh)
 {
     // Verifies the inline structured-grid gradient in PressureSolver::solve
