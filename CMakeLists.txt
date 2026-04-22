@@ -55,6 +55,7 @@ set(FLOWCORE_SOURCES
     src/core/Field.cpp
     src/core/BoundaryCondition.cpp
     src/solver/NavierStokesSolver.cpp
+    src/solver/MomentumSolver.cpp
     src/solver/PressureSolver.cpp
     src/solver/Discretization.cpp
     src/io/MeshReader.cpp
@@ -82,6 +83,29 @@ target_link_libraries(lgflow PRIVATE flowcore_lib)
 add_executable(lgflow_validate_lid
     src/validate/lid_driven_cavity_validate.cpp)
 target_link_libraries(lgflow_validate_lid PRIVATE flowcore_lib)
+
+# ── GUI executable (SFML) ────────────────────────────────────────────────────
+find_package(SFML 3 COMPONENTS Graphics Window System QUIET)
+if(SFML_FOUND)
+    add_executable(lgflow_ui src/ui/main_ui.cpp)
+    target_include_directories(lgflow_ui PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/ui)
+    target_link_libraries(lgflow_ui PRIVATE
+        flowcore_lib
+        SFML::Graphics
+        SFML::Window
+        SFML::System)
+    # SFML 3 on Windows: copy DLLs next to the executable for Debug runs
+    if(WIN32)
+        add_custom_command(TARGET lgflow_ui POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_RUNTIME_DLLS:lgflow_ui>
+                $<TARGET_FILE_DIR:lgflow_ui>
+            COMMAND_EXPAND_LISTS)
+    endif()
+    message(STATUS "LG-Flow: SFML UI target enabled (lgflow_ui)")
+else()
+    message(STATUS "LG-Flow: SFML not found — GUI target skipped")
+endif()
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
 enable_testing()
