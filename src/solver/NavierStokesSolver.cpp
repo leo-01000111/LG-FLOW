@@ -259,6 +259,14 @@ void NavierStokesSolver::step(double dt)
     m_momentumSolver->solve(
         uStar, uOld, m_pressure.value(), m_dtEff, m_rho, m_nu, m_convScheme, m_alphaU);
 
+    // ── 1b. Apply BCs to u* before pressure correction ───────────────────────
+    // The pressure Poisson equation must see the correct prescribed boundary
+    // velocities (lid, walls) so it can account for the exact boundary fluxes
+    // when driving interior divergence to zero.  Applying BCs here — rather
+    // than only after the pressure correction — prevents the BC reset at step 4
+    // from invalidating the divergence reduction achieved by the pressure solver.
+    m_bc.applyVelocity(uStar, m_mesh);
+
     // ── 2. Pressure correction ────────────────────────────────────────────────
     // PressureSolver::solve updates uStar and m_pressure in place.
     // Additional passes (solver.pressure_corrections_per_step > 1) drive the
@@ -287,10 +295,10 @@ void NavierStokesSolver::step(double dt)
     const Field<Eigen::Vector2d> diff = uNew + uOld * (-1.0);
     m_velResidual  = diff.norm() / std::max(uOld.norm(), 1e-12);
 
-    // continuity residual = ||∇·u^{k+1}||_2 (Rhie-Chow face interpolation)
-    // Consistent with the pressure-correction equation, which drives the
-    // Rhie-Chow divergence to zero. Using plain divergence() would measure a
-    // different quantity and give a falsely high residual on collocated grids.
+    // continuity residual = ||div_RC(u^{k+1}, p^{k+1})||_2
+    // At convergence, div_RC → 0 and p^{k+1} → p^k, so this is self-consistent.
+    // Plain div(u) does NOT converge to zero for Rhie-Chow (it equals the RC
+    // correction term for smooth pressure), so div_RC is the correct metric.
     // Reference: Rhie & Chow (1983); Ferziger & Perić (2020) Section 7.5.
     m_contResidual = Discretization::divergenceRhieChow(
         uNew, m_pressure.value(), m_mesh, m_dtEff, m_rho).norm();
