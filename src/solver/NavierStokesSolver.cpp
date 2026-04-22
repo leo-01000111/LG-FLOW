@@ -180,8 +180,9 @@ void NavierStokesSolver::initialize()
     m_pressure.emplace(m_mesh, 0.0);
     m_velocity.emplace(m_mesh, Eigen::Vector2d::Zero());
 
-    // Construct pressure solver bound to the loaded mesh.
+    // Construct pressure and momentum solvers bound to the loaded mesh.
     m_pressureSolver.emplace(m_mesh);
+    m_momentumSolver.emplace(m_mesh);
 
     // Apply boundary conditions to set initial field values at boundaries.
     // Boundary conditions are applied after each field update in the SIMPLE loop;
@@ -246,88 +247,17 @@ void NavierStokesSolver::step(double dt)
         m_dtEff = std::min({dt, dtConv, dtDiff});
     }
 
-    // ── 1. Momentum predictor ─────────────────────────────────────────────────
-    // Decompose velocity into scalar components for gradient/laplacian operators.
-    Field<double> ux(m_mesh, 0.0);
-    Field<double> uy(m_mesh, 0.0);
-    for (int c = 0; c < Nc; ++c)
-    {
-        ux[c] = uOld[c].x();
-        uy[c] = uOld[c].y();
-    }
-
-    const Field<double>          lapUx = Discretization::laplacian(ux, m_mesh);
-    const Field<double>          lapUy = Discretization::laplacian(uy, m_mesh);
-    const Field<Eigen::Vector2d> gradP = Discretization::gradient(m_pressure.value(), m_mesh);
-
-    // u* = u^k + dt_eff * [ -(u^k·∇)u - (1/ρ) ∇p^k + ν ∇²u^k ]
-    // Reference: Ferziger & Peric (2020) eq. 7.20 (explicit predictor form).
+    // ── 1. Momentum predictor (semi-implicit) ─────────────────────────────────
+    // Solves the under-relaxed implicit viscous system for u*:
+    //   (a_P/α_u) u*_P − ν a_f u*_nb = b_P + (1−α_u)/α_u · a_P · u^k_P
+    //
+    // Under-relaxation is embedded in the matrix (Patankar 1980, eq. 6.36) so
+    // the pressure-corrected u* remains mass-conserving and can be committed
+    // directly without a post-solve mixing step (see step 3 below).
+    // Reference: Ferziger & Perić (2020) eq. 7.17 (semi-implicit SIMPLE predictor).
     Field<Eigen::Vector2d> uStar(m_mesh, Eigen::Vector2d::Zero());
-
-    if (m_convScheme == ConvectionScheme::CENTRAL)
-    {
-        // Central differencing (Gauss face-average gradient).
-        // Reference: Ferziger & Peric (2020) eq. 4.22.
-        const Field<Eigen::Vector2d> gradUx = Discretization::gradient(ux, m_mesh);
-        const Field<Eigen::Vector2d> gradUy = Discretization::gradient(uy, m_mesh);
-        for (int c = 0; c < Nc; ++c)
-        {
-            const double convX = uOld[c].dot(gradUx[c]);  // (u·∇)ux — central
-            const double convY = uOld[c].dot(gradUy[c]);  // (u·∇)uy — central
-            uStar[c].x() = uOld[c].x() + m_dtEff * (-convX - (1.0 / m_rho) * gradP[c].x() + m_nu * lapUx[c]);
-            uStar[c].y() = uOld[c].y() + m_dtEff * (-convY - (1.0 / m_rho) * gradP[c].y() + m_nu * lapUy[c]);
-        }
-    }
-    else
-    {
-        // First-order upwind (donor-cell) differencing.
-        // For each component φ and direction x: if u_x ≥ 0, use backward difference
-        // (φ[i,j] − φ[i-1,j])/dx; if u_x < 0, forward difference.
-        // At domain boundaries (no neighbour): zero-gradient closure (difference = 0).
-        // Reference: Ferziger & Peric (2020) eq. 4.24 (donor-cell).
-        const double dx = m_cfgLx / static_cast<double>(Nx);
-        const double dy = m_cfgLy / static_cast<double>(Ny);
-
-        for (int c = 0; c < Nc; ++c)
-        {
-            const int    i    = c / Ny;
-            const int    j    = c % Ny;
-            const double ux_c = uOld[c].x();
-            const double uy_c = uOld[c].y();
-
-            double dux_dx, dux_dy, duy_dx, duy_dy;
-
-            // x-direction upwind
-            if (ux_c >= 0.0)
-            {
-                dux_dx = (i > 0)      ? (ux[c] - ux[(i - 1) * Ny + j]) / dx : 0.0;
-                duy_dx = (i > 0)      ? (uy[c] - uy[(i - 1) * Ny + j]) / dx : 0.0;
-            }
-            else
-            {
-                dux_dx = (i < Nx - 1) ? (ux[(i + 1) * Ny + j] - ux[c]) / dx : 0.0;
-                duy_dx = (i < Nx - 1) ? (uy[(i + 1) * Ny + j] - uy[c]) / dx : 0.0;
-            }
-
-            // y-direction upwind
-            if (uy_c >= 0.0)
-            {
-                dux_dy = (j > 0)      ? (ux[c] - ux[i * Ny + (j - 1)]) / dy : 0.0;
-                duy_dy = (j > 0)      ? (uy[c] - uy[i * Ny + (j - 1)]) / dy : 0.0;
-            }
-            else
-            {
-                dux_dy = (j < Ny - 1) ? (ux[i * Ny + (j + 1)] - ux[c]) / dy : 0.0;
-                duy_dy = (j < Ny - 1) ? (uy[i * Ny + (j + 1)] - uy[c]) / dy : 0.0;
-            }
-
-            const double convX = ux_c * dux_dx + uy_c * dux_dy;
-            const double convY = ux_c * duy_dx + uy_c * duy_dy;
-
-            uStar[c].x() = uOld[c].x() + m_dtEff * (-convX - (1.0 / m_rho) * gradP[c].x() + m_nu * lapUx[c]);
-            uStar[c].y() = uOld[c].y() + m_dtEff * (-convY - (1.0 / m_rho) * gradP[c].y() + m_nu * lapUy[c]);
-        }
-    }
+    m_momentumSolver->solve(
+        uStar, uOld, m_pressure.value(), m_dtEff, m_rho, m_nu, m_convScheme, m_alphaU);
 
     // ── 2. Pressure correction ────────────────────────────────────────────────
     // PressureSolver::solve updates uStar and m_pressure in place.
@@ -341,9 +271,11 @@ void NavierStokesSolver::step(double dt)
             uStar, m_pressure.value(), m_dtEff, m_rho, m_alphaP);
     }
 
-    // ── 3. Velocity under-relaxation ──────────────────────────────────────────
-    // u^{k+1} = α_u · u* + (1 - α_u) · u^k
-    Field<Eigen::Vector2d> uNew = uStar * m_alphaU + uOld * (1.0 - m_alphaU);
+    // ── 3. Commit corrected velocity ──────────────────────────────────────────
+    // u^{k+1} = u*  (pressure-corrected; under-relaxation was embedded in step 1)
+    // No post-solve mixing with u^k: that would destroy the mass conservation
+    // that the pressure correction just achieved.
+    Field<Eigen::Vector2d> uNew = uStar;
 
     // ── 4. Apply boundary conditions ──────────────────────────────────────────
     // BCs applied after each field update, not before (CLAUDE.md convention).
@@ -355,8 +287,13 @@ void NavierStokesSolver::step(double dt)
     const Field<Eigen::Vector2d> diff = uNew + uOld * (-1.0);
     m_velResidual  = diff.norm() / std::max(uOld.norm(), 1e-12);
 
-    // continuity residual = ||∇·u^{k+1}||_2
-    m_contResidual = Discretization::divergence(uNew, m_mesh).norm();
+    // continuity residual = ||∇·u^{k+1}||_2 (Rhie-Chow face interpolation)
+    // Consistent with the pressure-correction equation, which drives the
+    // Rhie-Chow divergence to zero. Using plain divergence() would measure a
+    // different quantity and give a falsely high residual on collocated grids.
+    // Reference: Rhie & Chow (1983); Ferziger & Perić (2020) Section 7.5.
+    m_contResidual = Discretization::divergenceRhieChow(
+        uNew, m_pressure.value(), m_mesh, m_dtEff, m_rho).norm();
 
     // Detect non-finite residuals immediately; never let them propagate silently.
     if (std::isnan(m_velResidual) || std::isinf(m_velResidual))
