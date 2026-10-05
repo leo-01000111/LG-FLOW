@@ -715,3 +715,47 @@ Rules:
   - Documentation only; no build or tests run.
 - Risks/TODOs:
   - Same open items as the entries above.
+
+## 2026-10-06 00:50 (Europe/Warsaw) - Boundary Conditions as Boundary-Face Fluxes
+- Author: Claude Code
+- Status: committed (`1b12bf3`..`59ed1c3` on `feature/new-solver`, merged as `50ef67e`)
+- Summary:
+  - `BoundaryCondition::buildVelocityFaces()` / `buildPressureFaces()` precompute per-face
+    closures (owner, normal, area, half-cell distance, kind, value) once per mesh.
+  - `Discretization` gains boundary-aware Gauss gradients and Rhie-Chow divergence (exact
+    u_b.n.A at walls/inlets, Rhie-Chow outlet faces with fixed p).
+  - `MomentumSolver` / `PressureSolver::setBoundaryFaces()`: Dirichlet wall/inlet viscous flux
+    nu*A*(u_b - u_P)/d_b, upwind donor from Dirichlet faces, p' = 0 on outlet faces
+    (a_b = A/d_b); cell 0 pinned only in closed domains.
+  - `NavierStokesSolver` wires the faces in `initialize()` and no longer overwrites boundary
+    cells; walls now sit at the domain edges. `PARABOLIC_INLET` uses face-averaged values
+    (inflow exactly U*H) and throws on top/bottom patches.
+  - API change: `PressureSolver::setDirichletPressureCells()` removed;
+    `BoundaryCondition::applyVelocity()/applyPressure()` documented as legacy.
+  - Compatibility path: `WallDistance` and Spalart-Allmaras still use wall cells (owners of
+    WALL faces), documented in `BoundaryCondition.hpp`.
+  - Duplicated explicit-source code of the two `MomentumSolver::solve()` overloads moved to
+    `computeExplicitSource()`.
+  - README, `case_validate.cfg` and `test_ghia_re100.cpp` record the new Ghia baseline.
+- Files changed:
+  - `src/core/BoundaryCondition.hpp`, `src/core/BoundaryCondition.cpp`
+  - `src/solver/Discretization.hpp`, `src/solver/Discretization.cpp`
+  - `src/solver/MomentumSolver.hpp`, `src/solver/MomentumSolver.cpp`
+  - `src/solver/PressureSolver.hpp`, `src/solver/PressureSolver.cpp`
+  - `src/solver/NavierStokesSolver.hpp`, `src/solver/NavierStokesSolver.cpp`
+  - `tests/test_bc.cpp`, `tests/test_discretization.cpp`, `tests/test_momentum_solver.cpp`,
+    `tests/test_pressure_solver.cpp`, `tests/test_solver_init.cpp`
+  - `tests/validation/test_ghia_re100.cpp`, `cases/lid_driven_cavity/case_validate.cfg`, `README.md`
+- Validation:
+  - `cmake --build build --config Release` then `ctest -C Release` (from `build/`):
+    242/242 passed (1 SA integration test skipped, as before); baseline on `main` was 221/221.
+  - `lgflow_validate_lid cases/lid_driven_cavity/case_validate.cfg 2000`: u L2 0.0712 -> 0.0432,
+    v L2 0.0375 -> 0.0221, converged in 1376 iterations (was 1297).
+  - `lgflow cases/channel_flow/case.cfg`: continuity residual 0.1496 (stalled) -> 5.3e-4 at the
+    velocity-residual stop; with tolerance 1e-10 it falls to 1.7e-8 by iteration 542.
+  - `lgflow_flat_plate`: runs, residuals finite (no accuracy check).
+- Risks/TODOs:
+  - `continuityResidual()` is an un-normalised L2 norm (depends on cell count).
+  - `run()` stops on the velocity residual only although its doc says velocity AND continuity.
+  - SA / `WallDistance` wall treatment still cell-based (compatibility path).
+  - Poiseuille channel validation test designed, not yet implemented.
