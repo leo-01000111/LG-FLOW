@@ -574,3 +574,144 @@ Rules:
     datum, not the divergence).
   - SYMMETRY BC is still a no-op.
   - SparseLU O(N^1.5) memory limitation for meshes above ~256×256 unchanged.
+
+---
+
+> Backfill note (2026-10-05): the six entries below were written after the fact from
+> `git log` and the commit messages, because no HISTORY.md entries were made for those
+> commits at the time. Numbers come from the commit messages; nothing was re-run for them.
+
+## 2026-04-22 12:43 (Europe/Warsaw) - SIMPLE Fix: Under-Relaxation Inside the Momentum Matrix
+- Author: Claude Code
+- Status: committed (`5c6e175`)
+- Summary:
+  - Replaced post-solve velocity mixing (`u = alpha_u*u* + (1-alpha_u)*u_old`) with implicit
+    under-relaxation in the momentum matrix (Patankar 1980, eq. 6.36): diagonal scaled by
+    `1/alpha_u`, `(1-alpha_u)/alpha_u * aP * u_old` added to the RHS.
+  - Post-solve mixing had undone the mass conservation from the pressure correction, so the
+    continuity residual stalled at about 33 (the open risk from the Phase 9 entry).
+  - Momentum predictor moved into `MomentumSolver` with an implicit viscous term.
+  - New tests `AlphaUZero_Throws`, `AlphaURelaxed_ProducesFiniteResult`.
+- Files changed:
+  - `src/solver/MomentumSolver.cpp`, `src/solver/MomentumSolver.hpp`
+  - `src/solver/NavierStokesSolver.cpp`
+  - `tests/test_momentum_solver.cpp`
+- Validation:
+  - Commit message: all 166 tests pass.
+- Risks/TODOs:
+  - Cavity convergence still needed the BC ordering fix below.
+
+## 2026-04-22 13:49 (Europe/Warsaw) - SIMPLE Fix: Apply BCs Before the Pressure Correction
+- Author: Claude Code
+- Status: committed (`be7e28c`)
+- Summary:
+  - `applyVelocity(uStar)` now runs between the momentum predictor and the pressure Poisson
+    assembly, so the Poisson RHS sees the prescribed boundary velocities (e.g. lid = (1,0)).
+    The post-correction BC application is kept.
+  - Applying BCs only after the correction had reset boundary velocities and undone the
+    divergence reduction in the neighbouring interior cells.
+  - Continuity residual reverted to the Rhie-Chow divergence `div_RC(u_new, p^{k+1})`; plain
+    `div(u)` does not go to zero on a collocated Rhie-Chow grid.
+  - Note: this changes the SIMPLE step order documented in CLAUDE.md (BCs now also applied
+    before the pressure correction); the reason is above.
+- Files changed:
+  - `src/solver/NavierStokesSolver.cpp`
+- Validation:
+  - Commit message: 32x32 cavity, Re=100, converges in 1577 iterations to vel=3.2e-6,
+    cont=9.9e-6. All 166 tests pass.
+- Risks/TODOs:
+  - None recorded.
+
+## 2026-04-22 16:55 (Europe/Warsaw) - INLET/OUTLET BCs + Generalized Pressure Reference Cells
+- Author: Claude Code
+- Status: committed (`831336f`)
+- Summary:
+  - `BoundaryCondition::collectCellsOfType()` maps patch sides to sorted, deduplicated cell IDs.
+  - `PressureSolver::setDirichletPressureCells()` pins any set of cells (the outlet column)
+    instead of only cell 0; `NavierStokesSolver::initialize()` uses the OUTLET cells, falling
+    back to cell 0 when there is no OUTLET.
+  - Convergence criterion is now the velocity residual only. `cont_residual` stays in
+    `history.csv` as a diagnostic, because `div_RC` keeps a structural offset proportional to
+    dp/dx at open boundaries.
+  - New case `cases/channel_flow/case.cfg` (64x16, Re=100, Poiseuille).
+  - 5 new tests (4 for `collectCellsOfType`, 1 for `setDirichletPressureCells`).
+- Files changed:
+  - `cases/channel_flow/case.cfg`
+  - `src/core/BoundaryCondition.cpp`, `src/core/BoundaryCondition.hpp`
+  - `src/solver/NavierStokesSolver.cpp`
+  - `src/solver/PressureSolver.cpp`, `src/solver/PressureSolver.hpp`
+  - `tests/test_bc.cpp`, `tests/test_pressure_solver.cpp`
+- Validation:
+  - Commit message: 171 tests. Cavity 1297 iterations (vel=9.96e-6); channel 275 iterations
+    (vel=9.63e-6).
+- Risks/TODOs:
+  - No automated comparison of the channel result with the analytical Poiseuille profile.
+
+## 2026-04-22 19:42 (Europe/Warsaw) - SFML GUI (`lgflow_ui`) With Live Convergence Plot
+- Author: Claude Code
+- Status: committed (`405248f`)
+- Summary:
+  - Header-only SFML 3 widgets: colour palette, layout constants, rounded-rect generators,
+    log-scale residual plot, side panel with case selector and Run/Stop, status bar.
+  - `main_ui.cpp`: solver runs on a background thread and posts residuals to a
+    mutex-protected `SolverState` that the UI reads each frame.
+  - CMake: optional `find_package(SFML 3)`; `lgflow_ui` is skipped if SFML is missing. SFML
+    DLLs are copied next to the exe on Windows.
+- Files changed:
+  - `CMakeLists.txt`
+  - `src/ui/main_ui.cpp`, `src/ui/ResidualPlot.hpp`, `src/ui/RoundedRect.hpp`,
+    `src/ui/SidePanel.hpp`, `src/ui/StatusBar.hpp`, `src/ui/UIColors.hpp`, `src/ui/UILayout.hpp`
+- Validation:
+  - Not recorded in the commit message.
+- Risks/TODOs:
+  - No tests for the UI code.
+
+## 2026-10-05 19:31 (Europe/Warsaw) - Unstructured Solver, Gmsh Reader, Spalart-Allmaras, GUI Field View (WIP)
+- Author: Claude Code
+- Status: committed (`d86fc17`), marked work in progress
+- Summary:
+  - Unstructured mesh, field and BC classes (`src/mesh/`); Gmsh `.msh` v2 ASCII reader;
+    unstructured discretization and `UnstructuredNavierStokesSolver`.
+  - Spalart-Allmaras model with wall distance, enabled in the structured solver via
+    `solver.turbulence = SA`.
+  - New cases `channel_unstruct` and `flat_plate` with executables `lgflow_unstruct` and
+    `lgflow_flat_plate`.
+  - `lgflow_validation_tests` target (CTest `GhiaRe100`) and L2 thresholds in
+    `case_validate.cfg` (`max_u_l2 = 0.10`, `max_v_l2 = 0.06`).
+  - GUI: field view (pressure/velocity colormap, streamlines), Nx/Ny/Re/iteration inputs.
+  - Note: this goes beyond the Milestone 3/4 scope in CLAUDE.md (Milestones 5 and 6).
+- Files changed:
+  - 47 files; see `git show --stat d86fc17`.
+- Validation:
+  - Not recorded in the commit message. Test sources count 223 `TEST`/`TEST_F` macros
+    (220 unit, 3 validation); a fresh ctest run has not been logged.
+- Risks/TODOs:
+  - Unstructured solver: no solver-level tests and no validation case.
+  - `solver.nonorth_correctors` is parsed but unused.
+  - Spalart-Allmaras: no comparison with a reference (e.g. flat-plate skin friction).
+
+## 2026-10-05 19:42 (Europe/Warsaw) - README Rewrite
+- Author: Claude Code
+- Status: committed (`4943f86`)
+- Summary:
+  - README rewritten from the source: build targets, full config and BC reference, Re=100
+    validation details and exit codes, GUI, project status with WIP areas marked.
+  - Leaves author TODOs: SFML install route, measured validation numbers, fresh ctest count.
+- Files changed:
+  - `README.md`
+- Validation:
+  - Documentation only.
+- Risks/TODOs:
+  - Re-run `lgflow_validate_lid` (2000 iterations) and `ctest`, then fill in the README TODOs.
+
+## 2026-10-05 23:20 (Europe/Warsaw) - HISTORY.md Backfill
+- Author: Claude Code
+- Status: committed
+- Summary:
+  - Added the six entries above for commits `5c6e175` through `4943f86`.
+- Files changed:
+  - `HISTORY.md`
+- Validation:
+  - Documentation only; no build or tests run.
+- Risks/TODOs:
+  - Same open items as the entries above.
