@@ -1,3 +1,4 @@
+#include "core/BoundaryCondition.hpp"
 #include "core/Field.hpp"
 #include "core/Mesh.hpp"
 #include "solver/Discretization.hpp"
@@ -5,6 +6,7 @@
 #include <Eigen/Dense>
 #include <gtest/gtest.h>
 #include <stdexcept>
+#include <vector>
 
 namespace
 {
@@ -159,5 +161,142 @@ TEST(Discretization, LaplacianMeshMismatch_Throws)
     Mesh mesh2; mesh2.load(4, 4, 1.0, 1.0);
     Field<double> phi(mesh1, 0.0);
     EXPECT_THROW(static_cast<void>(Discretization::laplacian(phi, mesh2)),
+                 std::invalid_argument);
+}
+
+// ── Boundary-aware overloads ──────────────────────────────────────────────────
+
+namespace
+{
+/// 8×4 channel on [0, 2] × [0, 1]: dx = dy = 0.25.
+Mesh makeChannelMesh()
+{
+    Mesh m;
+    m.load(8, 4, 2.0, 1.0);
+    return m;
+}
+
+}  // namespace
+
+TEST(Discretization, GradientPressureFaces_LinearWithFixedOutlet_ExactInOutletColumn)
+{
+    const Mesh mesh = makeChannelMesh();
+    BoundaryCondition bc;
+    bc.addPatch("right", {BoundaryType::OUTLET, Eigen::Vector2d::Zero()});
+    const std::vector<PressureBoundaryFace> faces = bc.buildPressureFaces(mesh);
+
+    // p = 2 − x: zero at the outlet face, gradient −1.
+    Field<double> p(mesh, 0.0);
+    for (int i = 0; i < mesh.Nx(); ++i)
+        for (int j = 0; j < mesh.Ny(); ++j)
+            p(i, j) = 2.0 - mesh.getCellCenter(i, j).x();
+
+    const Field<Eigen::Vector2d> grad = Discretization::gradient(p, mesh, faces);
+
+    // Interior columns and the outlet column (fixed face value) are exact;
+    // the left column has a zero-gradient face and is not.
+    for (int i = 1; i < mesh.Nx(); ++i)
+        for (int j = 0; j < mesh.Ny(); ++j)
+        {
+            EXPECT_NEAR(grad(i, j).x(), -1.0, 1e-12) << "i=" << i << " j=" << j;
+            EXPECT_NEAR(grad(i, j).y(),  0.0, 1e-12) << "i=" << i << " j=" << j;
+        }
+}
+
+TEST(Discretization, GradientVelocityFaces_LinearShearBetweenWalls_ExactAtWallRows)
+{
+    const Mesh mesh = makeChannelMesh();
+    BoundaryCondition bc;
+    bc.addPatch("bottom", {BoundaryType::WALL, Eigen::Vector2d(0.0, 0.0)});
+    bc.addPatch("top",    {BoundaryType::WALL, Eigen::Vector2d(1.0, 0.0)});
+    const std::vector<VelocityBoundaryFace> faces = bc.buildVelocityFaces(mesh);
+
+    // Couette profile u_x = y matches both wall values: ∂u_x/∂y = 1 everywhere.
+    Field<double> ux(mesh, 0.0);
+    for (int i = 0; i < mesh.Nx(); ++i)
+        for (int j = 0; j < mesh.Ny(); ++j)
+            ux(i, j) = mesh.getCellCenter(i, j).y();
+
+    const Field<Eigen::Vector2d> grad = Discretization::gradient(ux, mesh, faces, 0);
+
+    for (int i = 0; i < mesh.Nx(); ++i)
+    {
+        EXPECT_NEAR(grad(i, 0).y(),              1.0, 1e-12) << "bottom row i=" << i;
+        EXPECT_NEAR(grad(i, mesh.Ny() - 1).y(),  1.0, 1e-12) << "top row i=" << i;
+    }
+}
+
+TEST(Discretization, GradientVelocityFaces_BadAxis_Throws)
+{
+    const Mesh mesh = makeChannelMesh();
+    const BoundaryCondition bc;
+    const std::vector<VelocityBoundaryFace> faces = bc.buildVelocityFaces(mesh);
+    const Field<double> ux(mesh, 0.0);
+
+    EXPECT_THROW(static_cast<void>(Discretization::gradient(ux, mesh, faces, 2)),
+                 std::invalid_argument);
+}
+
+TEST(Discretization, RhieChowFaces_InletIntoStillFluid_ExactInflowInFirstColumn)
+{
+    const Mesh mesh = makeChannelMesh();
+    BoundaryCondition bc;
+    bc.addPatch("left",   {BoundaryType::INLET,  Eigen::Vector2d(1.0, 0.0)});
+    bc.addPatch("right",  {BoundaryType::OUTLET, Eigen::Vector2d::Zero()});
+    bc.addPatch("bottom", {BoundaryType::WALL,   Eigen::Vector2d::Zero()});
+    bc.addPatch("top",    {BoundaryType::WALL,   Eigen::Vector2d::Zero()});
+    const std::vector<VelocityBoundaryFace> vf = bc.buildVelocityFaces(mesh);
+    const std::vector<PressureBoundaryFace> pf = bc.buildPressureFaces(mesh);
+
+    const Field<Eigen::Vector2d> vel(mesh, Eigen::Vector2d::Zero());
+    const Field<double>          p(mesh, 0.0);
+
+    const Field<double> div =
+        Discretization::divergenceRhieChow(vel, p, mesh, 0.01, 1.0, vf, pf);
+
+    // Inlet face carries U·A into each first-column cell: div = −U·dy/(dx·dy) = −1/dx.
+    for (int j = 0; j < mesh.Ny(); ++j)
+        EXPECT_NEAR(div(0, j), -4.0, 1e-12) << "j=" << j;
+    for (int i = 1; i < mesh.Nx(); ++i)
+        for (int j = 0; j < mesh.Ny(); ++j)
+            EXPECT_NEAR(div(i, j), 0.0, 1e-12) << "i=" << i << " j=" << j;
+}
+
+TEST(Discretization, RhieChowFaces_LinearPressureToOutlet_NoSpuriousFlux)
+{
+    const Mesh mesh = makeChannelMesh();
+    BoundaryCondition bc;
+    bc.addPatch("right", {BoundaryType::OUTLET, Eigen::Vector2d::Zero()});
+    const std::vector<VelocityBoundaryFace> vf = bc.buildVelocityFaces(mesh);
+    const std::vector<PressureBoundaryFace> pf = bc.buildPressureFaces(mesh);
+
+    // A linear pressure has equal compact and cell gradients, so the outlet
+    // Rhie-Chow correction must vanish: still fluid stays divergence-free there.
+    Field<double> p(mesh, 0.0);
+    for (int i = 0; i < mesh.Nx(); ++i)
+        for (int j = 0; j < mesh.Ny(); ++j)
+            p(i, j) = 2.0 - mesh.getCellCenter(i, j).x();
+    const Field<Eigen::Vector2d> vel(mesh, Eigen::Vector2d::Zero());
+
+    const Field<double> div =
+        Discretization::divergenceRhieChow(vel, p, mesh, 0.01, 1.0, vf, pf);
+
+    for (int j = 0; j < mesh.Ny(); ++j)
+        EXPECT_NEAR(div(mesh.Nx() - 1, j), 0.0, 1e-12) << "outlet j=" << j;
+}
+
+TEST(Discretization, RhieChowFaces_MismatchedFaceLists_Throws)
+{
+    const Mesh mesh = makeChannelMesh();
+    const BoundaryCondition bc;
+    const std::vector<VelocityBoundaryFace> vf = bc.buildVelocityFaces(mesh);
+    std::vector<PressureBoundaryFace>       pf = bc.buildPressureFaces(mesh);
+    pf.pop_back();
+
+    const Field<Eigen::Vector2d> vel(mesh, Eigen::Vector2d::Zero());
+    const Field<double>          p(mesh, 0.0);
+
+    EXPECT_THROW(static_cast<void>(
+                     Discretization::divergenceRhieChow(vel, p, mesh, 0.01, 1.0, vf, pf)),
                  std::invalid_argument);
 }
