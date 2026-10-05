@@ -33,6 +33,55 @@ struct BoundaryPatch
     Eigen::Vector2d  value{Eigen::Vector2d::Zero()};  ///< Prescribed vector value
 };
 
+/** @brief How the velocity is closed at a boundary face. */
+enum class VelocityBCKind
+{
+    DIRICHLET,     ///< Face velocity prescribed (WALL, INLET, PARABOLIC_INLET)
+    ZERO_GRADIENT  ///< Face velocity = owner-cell velocity (OUTLET, SYMMETRY, unpatched)
+};
+
+/** @brief How the pressure is closed at a boundary face. */
+enum class PressureBCKind
+{
+    FIXED,         ///< Face pressure prescribed (OUTLET, p = 0)
+    ZERO_GRADIENT  ///< Face pressure = owner-cell pressure (all other types)
+};
+
+/**
+ * @brief Precomputed velocity boundary data for one boundary face.
+ *
+ * Built once by BoundaryCondition::buildVelocityFaces() and handed to the
+ * consumers that need it (MomentumSolver, Rhie-Chow divergence), so the hot
+ * loops never look up patches by name.
+ */
+struct VelocityBoundaryFace
+{
+    int             face{-1};                          ///< Global face ID
+    int             owner{-1};                         ///< Interior cell owning the face
+    Eigen::Vector2d normal{Eigen::Vector2d::Zero()};   ///< Outward unit normal
+    double          area{0.0};                         ///< Face area (length in 2D) [m]
+    double          distance{0.0};                     ///< Owner centre → face centre [m]
+    VelocityBCKind  kind{VelocityBCKind::ZERO_GRADIENT};
+    Eigen::Vector2d value{Eigen::Vector2d::Zero()};    ///< Face velocity if DIRICHLET [m/s]
+};
+
+/**
+ * @brief Precomputed pressure boundary data for one boundary face.
+ *
+ * Built once by BoundaryCondition::buildPressureFaces() and handed to the
+ * consumers that need it (PressureSolver, pressure gradient, Rhie-Chow).
+ */
+struct PressureBoundaryFace
+{
+    int             face{-1};                          ///< Global face ID
+    int             owner{-1};                         ///< Interior cell owning the face
+    Eigen::Vector2d normal{Eigen::Vector2d::Zero()};   ///< Outward unit normal
+    double          area{0.0};                         ///< Face area (length in 2D) [m]
+    double          distance{0.0};                     ///< Owner centre → face centre [m]
+    PressureBCKind  kind{PressureBCKind::ZERO_GRADIENT};
+    double          value{0.0};                        ///< Face pressure if FIXED [Pa]
+};
+
 /**
  * @brief Applies boundary conditions to a velocity or pressure field.
  *
@@ -99,6 +148,33 @@ public:
      */
     [[nodiscard]] std::vector<int> collectCellsOfType(BoundaryType type,
                                                       const Mesh&  mesh) const;
+
+    /**
+     * @brief Builds the velocity closure for every boundary face of the mesh.
+     *
+     * Mapping: WALL / INLET → DIRICHLET with the patch value; PARABOLIC_INLET →
+     * DIRICHLET with u(y) = 6·U_avg·y·(Ly−y)/Ly² evaluated at the face centre;
+     * OUTLET, SYMMETRY and sides without a patch → ZERO_GRADIENT.
+     *
+     * Entries are in ascending global face order, identical to
+     * buildPressureFaces(), so index k refers to the same face in both.
+     *
+     * @param mesh Mesh providing face topology and geometry.
+     * @return One entry per boundary face.
+     * @throws std::invalid_argument if PARABOLIC_INLET is used on "top" or "bottom".
+     */
+    [[nodiscard]] std::vector<VelocityBoundaryFace> buildVelocityFaces(const Mesh& mesh) const;
+
+    /**
+     * @brief Builds the pressure closure for every boundary face of the mesh.
+     *
+     * Mapping: OUTLET → FIXED with p = 0; all other types and unpatched sides →
+     * ZERO_GRADIENT. Same face order as buildVelocityFaces().
+     *
+     * @param mesh Mesh providing face topology and geometry.
+     * @return One entry per boundary face.
+     */
+    [[nodiscard]] std::vector<PressureBoundaryFace> buildPressureFaces(const Mesh& mesh) const;
 
 private:
     std::unordered_map<std::string, BoundaryPatch> m_patches;
