@@ -70,7 +70,6 @@ static void solverThread(const std::string& configPath, SolverState* state,
         if (ov.maxIter > 0) cfg.set("solver.max_iter", ov.maxIter);
 
         const int    maxIter = cfg.get<int>("solver.max_iter", 3000);
-        const double tol     = cfg.get<double>("solver.tolerance", 1e-5);
         const int    Nx      = cfg.get<int>("mesh.Nx", 16);
         const int    Ny      = cfg.get<int>("mesh.Ny", 16);
         const float  Lx      = static_cast<float>(cfg.get<double>("mesh.Lx", 1.0));
@@ -98,7 +97,8 @@ static void solverThread(const std::string& configPath, SolverState* state,
             }
 
             // Post field snapshot every 25 iterations or on convergence
-            const bool doSnap = (iter % 25 == 0) || (vel < tol);
+            const bool converged = solver.isConverged();
+            const bool doSnap    = (iter % 25 == 0) || converged;
             if (doSnap) {
                 const auto& p = solver.pressure();
                 const auto& u = solver.velocity();
@@ -127,7 +127,7 @@ static void solverThread(const std::string& configPath, SolverState* state,
                 state->snapReady  = true;
             }
 
-            if (vel < tol) {
+            if (converged) {
                 std::lock_guard<std::mutex> lk(state->mtx);
                 state->converged = true;
                 break;

@@ -176,3 +176,17 @@ TEST(NavierStokesSolverParams, Step_DtNegativeAfterInit_Throws)
     solver.initialize();
     EXPECT_THROW(solver.step(-0.01), std::invalid_argument);
 }
+
+// ── Constructor: solver.tolerance_continuity ──────────────────────────────────
+
+TEST(NavierStokesSolverParams, Constructor_ToleranceContinuityZero_Throws)
+{
+    Config cfg = singleKeyConfig("p_tolc_zero.cfg", "solver.tolerance_continuity", "0.0");
+    EXPECT_THROW(NavierStokesSolver solver(cfg), std::invalid_argument);
+}
+
+TEST(NavierStokesSolverParams, Constructor_ToleranceContinuityNegative_Throws)
+{
+    Config cfg = singleKeyConfig("p_tolc_neg.cfg", "solver.tolerance_continuity", "-1e-4");
+    EXPECT_THROW(NavierStokesSolver solver(cfg), std::invalid_argument);
+}

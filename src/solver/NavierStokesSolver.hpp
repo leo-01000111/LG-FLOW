@@ -61,6 +61,7 @@ public:
      *   mesh.Lx (default 1.0), mesh.Ly (default 1.0)
      *   solver.dt (default 0.01), solver.rho (default 1.0)
      *   solver.nu (default 0.01), solver.tolerance (default 1e-6)
+     *   solver.tolerance_continuity (default 1e-4)
      *
      * @param config Parsed configuration object.
      */
@@ -97,8 +98,8 @@ public:
      * @brief Runs the solver until convergence or maxIter is reached.
      *
      * Calls step() in a loop, logging progress every 50 iterations.
-     * Stops when velocityResidual() < tolerance AND
-     * continuityResidual() < tolerance (from config).
+     * Stops when isConverged(): velocityResidual() < solver.tolerance AND
+     * continuityResidual() < solver.tolerance_continuity.
      * Writes history.csv in output.dir with one row per iteration.
      * Writes VTK snapshots every output.vtk_interval iterations.
      *
@@ -124,10 +125,25 @@ public:
     [[nodiscard]] double velocityResidual() const;
 
     /**
-     * @brief Returns the current continuity (divergence) residual.
-     * @return ||∇·u^{k+1}||_2
+     * @brief Returns the current relative continuity residual.
+     *
+     * R_k / R_0 with R_k = ||∇·u*||_2 (boundary-aware Rhie-Chow divergence of
+     * the momentum-predicted velocity) and R_0 the largest R_k of the first
+     * CONTINUITY_REFERENCE_STEPS steps. Reported as 1 until R_0 is known and as
+     * 0 if R_0 is zero (flow already divergence-free). The ratio cancels the
+     * √N growth of the norm with cell count, so the value is comparable across
+     * mesh refinements.
+     *
+     * @return Dimensionless relative continuity residual.
      */
     [[nodiscard]] double continuityResidual() const;
+
+    /**
+     * @brief True when every convergence criterion is met.
+     * @return velocityResidual() < solver.tolerance AND
+     *         continuityResidual() < solver.tolerance_continuity.
+     */
+    [[nodiscard]] bool isConverged() const;
 
     /**
      * @brief Returns the pressure-solver residual from the last step.
@@ -169,7 +185,8 @@ private:
     double           m_dt{0.01};
     double           m_rho{1.0};
     double           m_nu{0.01};
-    double           m_tolerance{1e-6};
+    double           m_tolerance{1e-6};             ///< Velocity residual tolerance
+    double           m_toleranceContinuity{1e-4};   ///< Relative continuity residual tolerance
     double           m_alphaU{0.7};         ///< Velocity under-relaxation factor
     double           m_alphaP{0.3};         ///< Pressure under-relaxation factor
     int              m_vtkInterval{100};    ///< Write VTK every N iterations
@@ -182,7 +199,14 @@ private:
     // ── Runtime state (valid only after initialize()) ─────────────────────────
     bool   m_initialized{false};
     double m_velResidual{1.0};      ///< ||u^{k+1} - u^k|| / max(||u^k||, 1e-12)
-    double m_contResidual{1.0};     ///< ||∇·u*||_2 (boundary-aware Rhie-Chow, before correction)
+    double m_contResidual{1.0};     ///< Relative continuity residual R_k / R_0
+    double m_contReference{0.0};    ///< R_0: max ||∇·u*||_2 over the first reference steps
+    int    m_stepCount{0};          ///< SIMPLE steps since initialize()
+
+    /// Steps over which R_0 is taken as the maximum raw continuity residual.
+    /// The first step from rest is often unrepresentative (ANSYS Fluent uses
+    /// the largest of the first five iterations for the same reason).
+    static constexpr int CONTINUITY_REFERENCE_STEPS = 5;
     double m_pressureResidual{0.0}; ///< ||A p' - b||_2 from PressureSolver
     double m_dtEff{0.0};            ///< Effective dt after CFL clamp (set by step())
 

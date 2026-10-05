@@ -129,15 +129,19 @@ with cell data `pressure` and `velocity`. They open in ParaView.
 
 ### Convergence criterion
 
-The run stops when the velocity residual drops below `solver.tolerance`. The
-velocity residual is `||u_new - u_old|| / max(||u_old||, 1e-12)`, measured on
-the committed velocity after boundary conditions are applied. The continuity
-residual is written to `history.csv` and the log as a diagnostic and does not
-stop the run. It is the norm of the Rhie-Chow divergence of the predicted
-velocity, taken before the pressure correction. For cases with INLET/OUTLET
-boundaries, a comment in `NavierStokesSolver.cpp` notes that it keeps a non-zero
-offset on the collocated grid even at steady state, which is why it is not used
-as a stopping test.
+The run stops only when both residuals are below their tolerances
+(`NavierStokesSolver::isConverged()`, also used by the GUI):
+
+- Velocity residual `||u_new - u_old|| / max(||u_old||, 1e-12)` below
+  `solver.tolerance`.
+- Relative continuity residual `R_k / R_0` below `solver.tolerance_continuity`.
+  `R_k` is the L2 norm of the Rhie-Chow divergence of the predicted velocity
+  (before the pressure correction), with exact fluxes on wall and inlet faces.
+  `R_0` is the largest `R_k` of the first 5 iterations; until then the value is
+  reported as 1. Being a ratio of norms over the same cells, it does not grow
+  with the cell count, so it is comparable across mesh refinements.
+
+Both values are written to `history.csv` and the log.
 
 ## Algorithm summary (structured solver)
 
@@ -176,6 +180,7 @@ are comments. Keys not listed below are ignored.
 | `solver.dt` | `0.01` | Time step (must be > 0) |
 | `solver.max_iter` | `1000` in `lgflow` | Maximum SIMPLE iterations |
 | `solver.tolerance` | `1e-6` | Velocity residual convergence threshold (must be > 0) |
+| `solver.tolerance_continuity` | `1e-4` | Relative continuity residual threshold (must be > 0); both thresholds must be met to stop |
 | `solver.rho` | `1.0` | Density (must be > 0) |
 | `solver.nu` | `0.01` | Kinematic viscosity (must be >= 0) |
 | `solver.alpha_u` | `0.7` | Velocity under-relaxation, in (0, 1] |
@@ -300,7 +305,7 @@ limit. If the reference CSV is missing, the four error rows are written as
 |---|---|
 | `validation.max_u_l2` | Fails if the u-centreline L2 error is larger. Ignored when the reference CSV is missing. |
 | `validation.max_v_l2` | Fails if the v-centreline L2 error is larger. Ignored when the reference CSV is missing. |
-| `validation.max_cont_residual` | Fails if the final continuity residual is larger. |
+| `validation.max_cont_residual` | Fails if the final relative continuity residual is larger. |
 
 `case_validate.cfg` sets `validation.max_u_l2 = 0.10` and
 `validation.max_v_l2 = 0.06`. Comments in that file and in

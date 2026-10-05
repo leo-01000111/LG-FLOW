@@ -94,6 +94,7 @@ NavierStokesSolver::NavierStokesSolver(const Config& config)
     m_rho         = config.get<double>("solver.rho",           1.0);
     m_nu          = config.get<double>("solver.nu",            0.01);
     m_tolerance   = config.get<double>("solver.tolerance",     1e-6);
+    m_toleranceContinuity = config.get<double>("solver.tolerance_continuity", 1e-4);
     m_alphaU      = config.get<double>("solver.alpha_u",       0.7);
     m_alphaP      = config.get<double>("solver.alpha_p",       0.3);
     m_vtkInterval = config.get<int>   ("output.vtk_interval",  100);
@@ -136,6 +137,10 @@ NavierStokesSolver::NavierStokesSolver(const Config& config)
         throw std::invalid_argument(
             "NavierStokesSolver: solver.tolerance must be > 0 (got "
             + std::to_string(m_tolerance) + ")");
+    if (m_toleranceContinuity <= 0.0)
+        throw std::invalid_argument(
+            "NavierStokesSolver: solver.tolerance_continuity must be > 0 (got "
+            + std::to_string(m_toleranceContinuity) + ")");
     if (m_alphaU <= 0.0 || m_alphaU > 1.0)
         throw std::invalid_argument(
             "NavierStokesSolver: solver.alpha_u must be in (0, 1] (got "
@@ -214,6 +219,8 @@ void NavierStokesSolver::initialize()
     m_initialized     = true;
     m_velResidual     = 1.0;
     m_contResidual    = 1.0;
+    m_contReference   = 0.0;
+    m_stepCount       = 0;
     m_pressureResidual = 0.0;
 
     // ── SA model initialization ───────────────────────────────────────────────
@@ -319,9 +326,30 @@ void NavierStokesSolver::step(double dt)
     // Rhie-Chow at outlets), so at convergence u* ≈ u^{k-1} and this residual
     // → 0 for both cavity and channel flows.
     // Reference: Rhie & Chow (1983); Ferziger & Perić (2020) §7.4.
-    m_contResidual = Discretization::divergenceRhieChow(
+    //
+    // Normalised by R_0 = max raw residual over the first
+    // CONTINUITY_REFERENCE_STEPS steps (CLAUDE.md: residuals relative to the
+    // initial residual), which also removes the √N growth of the L2 norm.
+    const double contRaw = Discretization::divergenceRhieChow(
         uStar, m_pressure.value(), m_mesh, m_dtEff, m_rho,
         m_velocityFaces, m_pressureFaces).norm();
+    if (std::isnan(contRaw) || std::isinf(contRaw))
+        throw std::runtime_error(
+            "NavierStokesSolver::step: continuity residual is non-finite (NaN or Inf)");
+
+    ++m_stepCount;
+    if (m_stepCount <= CONTINUITY_REFERENCE_STEPS)
+        m_contReference = std::max(m_contReference, contRaw);
+
+    // Smallest R_0 treated as non-zero; below it the predicted field was
+    // already divergence-free during the reference steps.
+    constexpr double CONT_REFERENCE_FLOOR = 1e-300;
+    if (m_stepCount < CONTINUITY_REFERENCE_STEPS)
+        m_contResidual = 1.0;
+    else if (m_contReference < CONT_REFERENCE_FLOOR)
+        m_contResidual = 0.0;
+    else
+        m_contResidual = contRaw / m_contReference;
 
     // ── 2. Pressure correction ────────────────────────────────────────────────
     // PressureSolver::solve updates uStar and m_pressure in place.
@@ -440,7 +468,7 @@ void NavierStokesSolver::run(int maxIter)
         // residual (div_RC of u*) is logged for diagnostics. With boundary-face
         // fluxes it converges for open-boundary flows too (the former ~0.15
         // structural offset came from overwriting boundary cells).
-        if (m_velResidual < m_tolerance)
+        if (isConverged())
         {
             Logger::get().info(
                 "Converged at iteration " + std::to_string(iter + 1)
@@ -469,6 +497,11 @@ double NavierStokesSolver::velocityResidual() const
 double NavierStokesSolver::continuityResidual() const
 {
     return m_contResidual;
+}
+
+bool NavierStokesSolver::isConverged() const
+{
+    return m_velResidual < m_tolerance && m_contResidual < m_toleranceContinuity;
 }
 
 double NavierStokesSolver::pressureResidual() const

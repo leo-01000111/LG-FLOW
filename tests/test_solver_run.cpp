@@ -182,3 +182,117 @@ TEST(NavierStokesSolverRun, Run_ConvergenceCheck_UsesBothVelocityAndContinuityRe
 
     std::filesystem::remove_all(tmpDir);
 }
+
+// ── Relative continuity residual and stopping rule ────────────────────────────
+
+namespace
+{
+/// Small 8×4 channel: uniform inlet left, outlet right, walls top/bottom.
+Config makeChannelConfig(const std::string& tmpDir)
+{
+    Config cfg = makeSmallConfig(tmpDir);
+    cfg.set<int>("mesh.Nx", 8);
+    cfg.set<double>("mesh.Lx", 2.0);
+    cfg.set<double>("solver.dt", 0.05);
+    cfg.set<std::string>("bc.left.type", "INLET");
+    cfg.set<double>("bc.left.value_x", 1.0);
+    cfg.set<std::string>("bc.right.type", "OUTLET");
+    cfg.set<std::string>("bc.top.type", "WALL");
+    cfg.set<std::string>("bc.bottom.type", "WALL");
+    return cfg;
+}
+}  // namespace
+
+TEST(NavierStokesSolverRun, ContinuityResidual_BeforeReferenceSteps_IsOne)
+{
+    const std::string tmpDir = makeTempDir("cont_reference");
+    NavierStokesSolver solver(makeChannelConfig(tmpDir));
+    solver.initialize();
+
+    // R_0 is the maximum over the first 5 steps; until then the relative
+    // residual is reported as exactly 1.
+    for (int k = 0; k < 4; ++k)
+    {
+        solver.step(0.05);
+        EXPECT_NEAR(solver.continuityResidual(), 1.0, 1e-15) << "step " << k + 1;
+    }
+
+    std::filesystem::remove_all(tmpDir);
+}
+
+TEST(NavierStokesSolverRun, ContinuityResidual_Channel_FallsBelowOne)
+{
+    const std::string tmpDir = makeTempDir("cont_falls");
+    NavierStokesSolver solver(makeChannelConfig(tmpDir));
+    solver.initialize();
+
+    for (int k = 0; k < 60; ++k)
+        solver.step(0.05);
+
+    EXPECT_GT(solver.continuityResidual(), 0.0);
+    EXPECT_LT(solver.continuityResidual(), 0.1);
+
+    std::filesystem::remove_all(tmpDir);
+}
+
+TEST(NavierStokesSolverRun, IsConverged_VelocityMetContinuityNot_ReturnsFalse)
+{
+    // Velocity tolerance trivially satisfied, continuity tolerance unreachable:
+    // the solver must not report convergence (both criteria are required).
+    const std::string tmpDir = makeTempDir("conv_vel_only");
+    Config cfg = makeChannelConfig(tmpDir);
+    cfg.set<double>("solver.tolerance", 10.0);
+    cfg.set<double>("solver.tolerance_continuity", 1e-300);
+    NavierStokesSolver solver(cfg);
+    solver.initialize();
+
+    solver.run(20);
+
+    EXPECT_LT(solver.velocityResidual(), 10.0);
+    EXPECT_FALSE(solver.isConverged());
+
+    std::filesystem::remove_all(tmpDir);
+}
+
+TEST(NavierStokesSolverRun, IsConverged_ContinuityMetVelocityNot_ReturnsFalse)
+{
+    const std::string tmpDir = makeTempDir("conv_cont_only");
+    Config cfg = makeChannelConfig(tmpDir);
+    cfg.set<double>("solver.tolerance", 1e-300);
+    cfg.set<double>("solver.tolerance_continuity", 10.0);
+    NavierStokesSolver solver(cfg);
+    solver.initialize();
+
+    solver.run(20);
+
+    EXPECT_LT(solver.continuityResidual(), 10.0);
+    EXPECT_FALSE(solver.isConverged());
+
+    std::filesystem::remove_all(tmpDir);
+}
+
+TEST(NavierStokesSolverRun, Run_LooseTolerances_DoesNotStopBeforeReferenceSteps)
+{
+    // Velocity tolerance trivially met and continuity tolerance 1: the
+    // relative continuity residual is exactly 1 (not < 1) until R_0 is known
+    // after 5 steps, so run() cannot stop earlier.
+    const std::string tmpDir = makeTempDir("conv_reference_steps");
+    Config cfg = makeChannelConfig(tmpDir);
+    cfg.set<double>("solver.tolerance", 10.0);
+    cfg.set<double>("solver.tolerance_continuity", 1.0);
+    NavierStokesSolver solver(cfg);
+    solver.initialize();
+
+    solver.run(200);
+
+    // history.csv: header + one row per completed step.
+    int rows = -1;
+    {
+        std::ifstream hist(tmpDir + "/history.csv");
+        for (std::string line; std::getline(hist, line);)
+            ++rows;
+    }
+    EXPECT_GE(rows, 5);
+
+    std::filesystem::remove_all(tmpDir);
+}

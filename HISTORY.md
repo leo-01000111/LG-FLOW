@@ -759,3 +759,32 @@ Rules:
   - `run()` stops on the velocity residual only although its doc says velocity AND continuity.
   - SA / `WallDistance` wall treatment still cell-based (compatibility path).
   - Poiseuille channel validation test designed, not yet implemented.
+
+## 2026-10-06 01:40 (Europe/Warsaw) - Relative Continuity Residual + Both-Criteria Stopping Rule
+- Author: Claude Code
+- Status: committed
+- Summary:
+  - `continuityResidual()` now returns R_k / R_0: R_k = ||div_RC(u*)||_2, R_0 = largest R_k of
+    the first 5 steps (reported as 1 until then, 0 if R_0 is zero). The ratio removes the
+    sqrt(N) growth with cell count. `history.csv` column has the same meaning.
+  - New key `solver.tolerance_continuity` (default 1e-4, must be > 0), set in every structured
+    case config.
+  - New `NavierStokesSolver::isConverged()`: velocity < `solver.tolerance` AND continuity <
+    `solver.tolerance_continuity`. Used by `run()` and by the GUI loop (previously velocity only,
+    although the `run()` doc already claimed both).
+  - API meaning change: `continuityResidual()` is dimensionless and relative (same signature).
+- Files changed:
+  - `src/solver/NavierStokesSolver.hpp`, `src/solver/NavierStokesSolver.cpp`, `src/ui/main_ui.cpp`
+  - `cases/channel_flow/case.cfg`, `cases/flat_plate/case.cfg`,
+    `cases/lid_driven_cavity/case.cfg`, `cases/lid_driven_cavity/case_validate.cfg`
+  - `tests/test_solver_run.cpp`, `tests/test_solver_params.cpp`, `README.md`
+- Validation:
+  - `cmake --build build --config Release` then `ctest -C Release`: 249/249 passed (1 skipped).
+  - `lgflow_validate_lid ... 2000`: converged at 1376 iterations (unchanged), relative continuity
+    7.1e-6, u/v L2 0.0432/0.0221 (unchanged).
+  - `lgflow cases/channel_flow/case.cfg`: converged at 331 (unchanged), relative continuity 8e-6.
+  - `lgflow cases/lid_driven_cavity/case.cfg`: converged at 2997.
+  - `lgflow_flat_plate` (500 iterations): not converged (velocity 1.0e-4), relative continuity 2.5e-5.
+- Risks/TODOs:
+  - In the current cases the relative continuity residual falls faster than the velocity
+    residual, so the new criterion does not yet change any iteration count.
