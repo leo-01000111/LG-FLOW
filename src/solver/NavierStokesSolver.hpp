@@ -13,6 +13,7 @@
 #include <Eigen/Dense>
 #include <optional>
 #include <string>
+#include <vector>
 
 /**
  * @brief Top-level orchestrator for the incompressible Navier-Stokes solver.
@@ -24,8 +25,12 @@
  *     1. Momentum predictor  -- solve for u* using explicit pressure gradient
  *     2. Pressure correction -- solve Poisson equation for p'
  *     3. Velocity correction -- u = u* - (dt/rho) * grad(p')
- *     4. Apply boundary conditions
- *     5. Check residuals
+ *     4. Check residuals
+ *
+ * Boundary conditions enter through boundary-face fluxes during assembly
+ * (walls and inlets at the domain edge, outlet pressure on the outlet face);
+ * no cell values are overwritten after a step. The face data is built once
+ * in initialize() and handed to each sub-solver.
  *
  * Reference: Patankar (1980), Ferziger & Peric (2020) Ch. 7.
  *
@@ -177,7 +182,7 @@ private:
     // ── Runtime state (valid only after initialize()) ─────────────────────────
     bool   m_initialized{false};
     double m_velResidual{1.0};      ///< ||u^{k+1} - u^k|| / max(||u^k||, 1e-12)
-    double m_contResidual{1.0};     ///< ||∇·u^{k+1}||_2
+    double m_contResidual{1.0};     ///< ||∇·u*||_2 (boundary-aware Rhie-Chow, before correction)
     double m_pressureResidual{0.0}; ///< ||A p' - b||_2 from PressureSolver
     double m_dtEff{0.0};            ///< Effective dt after CFL clamp (set by step())
 
@@ -190,6 +195,11 @@ private:
     std::optional<Field<Eigen::Vector2d>> m_velocity;
 
     BoundaryCondition m_bc;
+
+    /// Boundary-face closures built in initialize(); used for the continuity
+    /// residual. Copies are handed to the momentum and pressure solvers.
+    std::vector<VelocityBoundaryFace> m_velocityFaces;
+    std::vector<PressureBoundaryFace> m_pressureFaces;
 
     /// Pressure solver; empty until initialize() (requires loaded mesh).
     std::optional<PressureSolver> m_pressureSolver;

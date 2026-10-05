@@ -55,24 +55,10 @@ public:
                                double                  alphaP);
 
     /**
-     * @brief Sets the cells whose pressure correction is pinned to zero (p' = 0).
-     *
-     * For all-wall domains (no outlet), pass an empty vector or {0} — cell 0 is
-     * used as the single reference to fix the pure-Neumann singularity.
-     * For domains with an OUTLET, pass all outlet cell IDs so the pressure
-     * gradient can develop freely between inlet and outlet.
-     *
-     * Must be called before the first solve(). Calling it again reconfigures the
-     * reference without rebuilding the solver.
-     *
-     * @param cells Cell IDs to pin.  Out-of-range IDs are silently ignored.
-     */
-    void setDirichletPressureCells(std::vector<int> cells);
-
-    /**
      * @brief Supplies the boundary closure used by every subsequent solve().
      *
-     * When set, it replaces setDirichletPressureCells():
+     * Without it, every boundary face is zero-gradient and cell 0 is pinned
+     * (legacy closure, kept for standalone use and existing tests). When set:
      *   - The source uses the boundary-aware Rhie-Chow divergence (exact
      *     wall/inlet fluxes, Rhie-Chow outlet faces).
      *   - FIXED pressure faces (outlets) impose p' = 0 on the face, adding
@@ -91,8 +77,7 @@ public:
                           std::vector<VelocityBoundaryFace> velocityFaces);
 
 private:
-    const Mesh*      m_mesh;
-    std::vector<int> m_dirichletCells;  ///< Reference cells for Neumann singularity fix
+    const Mesh* m_mesh;
 
     std::vector<PressureBoundaryFace> m_pressureFaces;    ///< Empty → legacy closure
     std::vector<VelocityBoundaryFace> m_velocityFaces;    ///< Same order as m_pressureFaces

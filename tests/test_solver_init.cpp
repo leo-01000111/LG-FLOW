@@ -153,7 +153,7 @@ TEST(NavierStokesSolverInit, Initialize_ZeroNx_Throws)
 
 /// After initialize(), the top boundary cells must carry the lid velocity
 /// specified in the config (bc.top.value = 1.25 via fallback x-component).
-TEST(NavierStokesSolverInit, BCWiring_TopLid_SetsTopRow)
+TEST(NavierStokesSolverInit, BCWiring_TopLid_DrivesTopRow)
 {
     namespace fs = std::filesystem;
     const fs::path tmpFile =
@@ -176,12 +176,20 @@ TEST(NavierStokesSolverInit, BCWiring_TopLid_SetsTopRow)
     NavierStokesSolver solver(cfg);
     solver.initialize();
 
-    const auto& vel = solver.velocity();
+    // The lid acts on the top boundary faces, not on the top row of cells, so
+    // the fluid starts at rest and the lid must drag the top row along +x
+    // within one step.
+    const auto& vel0 = solver.velocity();
     const int Nx = 16, Ny = 16;  // defaults
+    for (int i = 0; i < Nx; ++i)
+        EXPECT_NEAR(vel0(i, Ny - 1).x(), 0.0, 1e-12) << "initial top row, i=" << i;
 
-    for (int i = 0; i < Nx; ++i) {
-        EXPECT_NEAR(vel(i, Ny - 1).x(), 1.25, 1e-12) << "top row, i=" << i;
-        EXPECT_NEAR(vel(i, Ny - 1).y(), 0.0,  1e-12) << "top row, i=" << i;
+    solver.step(0.01);
+
+    const auto& vel = solver.velocity();
+    for (int i = 1; i < Nx - 1; ++i) {
+        EXPECT_GT(vel(i, Ny - 1).x(), 0.0)            << "top row, i=" << i;
+        EXPECT_GT(vel(i, Ny - 1).x(), vel(i, 0).x())  << "column i=" << i;
     }
 }
 
