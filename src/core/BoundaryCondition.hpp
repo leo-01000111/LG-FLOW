@@ -13,10 +13,11 @@
  */
 enum class BoundaryType
 {
-    INLET,    ///< Prescribed velocity (Dirichlet velocity, extrapolated pressure)
-    OUTLET,   ///< Zero-gradient velocity, fixed (zero) pressure
-    WALL,     ///< No-slip: zero velocity at the face
-    SYMMETRY  ///< Zero normal gradient for all quantities
+    INLET,           ///< Prescribed uniform velocity (Dirichlet)
+    PARABOLIC_INLET, ///< Poiseuille profile: u(y)=6·U_avg·y·(Ly-y)/Ly²; value.x() = U_avg
+    OUTLET,          ///< Zero-gradient velocity, fixed (zero) pressure
+    WALL,            ///< No-slip: zero velocity at the face
+    SYMMETRY         ///< Zero normal gradient for all quantities
 };
 
 /**

@@ -2,6 +2,8 @@
 
 #include "core/Field.hpp"
 #include "core/Mesh.hpp"
+#include "mesh/UnstructuredField.hpp"
+#include "mesh/UnstructuredMesh.hpp"
 
 #include <Eigen/Dense>
 #include <string>
@@ -22,7 +24,7 @@ public:
     VTKWriter() = default;
 
     /**
-     * @brief Writes pressure and velocity fields to a .vtu file.
+     * @brief Writes pressure and velocity fields to a .vtu file (structured mesh).
      *
      * Output fields:
      *   - "pressure"  — scalar, one value per cell [Pa]
@@ -38,4 +40,25 @@ public:
                const Mesh&                   mesh,
                const Field<double>&          pressureField,
                const Field<Eigen::Vector2d>& velocityField);
+
+    /**
+     * @brief Writes pressure and velocity fields to a .vtk file (unstructured mesh).
+     *
+     * Uses ASCII legacy VTK DATASET UNSTRUCTURED_GRID format.
+     * Supports triangular (VTK type 5) and quadrilateral (VTK type 9) cells.
+     *
+     * Output fields:
+     *   - "pressure"  — scalar CELL_DATA [Pa]
+     *   - "velocity"  — 3-component vector CELL_DATA [m/s]
+     *
+     * @param filename      Path to the output .vtk file (created or overwritten).
+     * @param mesh          Unstructured mesh defining topology and geometry.
+     * @param pressureField Scalar pressure field indexed by CellId.
+     * @param velocityField Vector velocity field indexed by CellId.
+     * @throws std::runtime_error if the file cannot be created.
+     */
+    void write(const std::string&                          filename,
+               const UnstructuredMesh&                     mesh,
+               const UnstructuredField<double>&            pressureField,
+               const UnstructuredField<Eigen::Vector2d>&   velocityField);
 };

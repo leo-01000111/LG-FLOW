@@ -62,4 +62,41 @@ public:
      */
     [[nodiscard]] static Field<double>
     laplacian(const Field<double>& field, const Mesh& mesh);
+
+    /**
+     * @brief Computes the cell-centred divergence with Rhie-Chow face interpolation.
+     *
+     * Replaces the face velocity used in the continuity equation with a
+     * Rhie-Chow-corrected value to prevent pressure-velocity decoupling
+     * (checkerboard oscillations) on collocated meshes.
+     *
+     * For each interior face f between owner P and neighbour N, the normal
+     * face velocity is:
+     *
+     *   û_f · n̂_f = ū_f · n̂_f
+     *             − (dt/ρ) [(p_N − p_P)/|x_N − x_P|
+     *                       − 0.5·((∇p)_P + (∇p)_N) · n̂_f]
+     *
+     * where ū_f = 0.5(u_P + u_N) is the linearly interpolated face velocity.
+     * The correction term damps checkerboard pressure modes by restoring
+     * sensitivity to the compact (two-point) pressure gradient.
+     *
+     * Boundary faces: same as divergence() — owner value, no correction.
+     *
+     * Reference: Rhie & Chow (1983), AIAA J. 21(11):1525–1532.
+     *            Ferziger, Perić & Street (2020) Section 7.5.
+     *
+     * @param velocity  Predicted velocity field u* [m/s].
+     * @param pressure  Current pressure field p^k [Pa].
+     * @param mesh      Mesh defining cells and faces.
+     * @param dt        Effective time step [s].
+     * @param rho       Fluid density [kg/m³].
+     * @return Scalar field of Rhie-Chow-corrected divergence values [1/s].
+     */
+    [[nodiscard]] static Field<double>
+    divergenceRhieChow(const Field<Eigen::Vector2d>& velocity,
+                       const Field<double>&          pressure,
+                       const Mesh&                   mesh,
+                       double                        dt,
+                       double                        rho);
 };

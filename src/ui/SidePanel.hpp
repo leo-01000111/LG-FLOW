@@ -1,13 +1,17 @@
 #pragma once
+#include "Colormap.hpp"
 #include "RoundedRect.hpp"
+#include "TextInput.hpp"
 #include "UIColors.hpp"
 #include "UILayout.hpp"
 
 #include <SFML/Graphics/Font.hpp>
 #include <SFML/Graphics/RenderTarget.hpp>
+#include <SFML/Graphics/RenderWindow.hpp>
 #include <SFML/Graphics/Text.hpp>
 #include <SFML/Window/Event.hpp>
 
+#include <array>
 #include <cmath>
 #include <functional>
 #include <string>
@@ -106,13 +110,23 @@ struct Button
 };
 
 // ── SidePanel ─────────────────────────────────────────────────────────────────
-// Left-side control panel with case selector and run/stop button.
+// Left-side control panel with case selector, editable parameters, and run/stop button.
 class SidePanel
 {
 public:
-    std::function<void(int)>  onCaseSelected;
-    std::function<void()>     onRunPressed;
-    std::function<void()>     onStopPressed;
+    // ── Public types ──────────────────────────────────────────────────────────
+    struct CaseParams {
+        int    Nx      = 32;
+        int    Ny      = 32;
+        double Re      = 100.0;
+        int    maxIter = 3000;
+    };
+
+    // ── Callbacks ─────────────────────────────────────────────────────────────
+    std::function<void(int)>         onCaseSelected;
+    std::function<void()>            onRunPressed;
+    std::function<void()>            onStopPressed;
+    std::function<void(DisplayMode)> onModeSelected;
 
     explicit SidePanel(const sf::Font& font)
         : m_font(font)
@@ -126,6 +140,24 @@ public:
         rebuild();
     }
 
+    // Call this after setCases() to supply per-case defaults.
+    void setCaseDefaults(std::vector<CaseParams> defaults)
+    {
+        m_caseDefaults = std::move(defaults);
+        if (!m_caseDefaults.empty())
+            applyParams(m_caseDefaults[static_cast<std::size_t>(m_selectedCase)]);
+    }
+
+    [[nodiscard]] CaseParams getParams() const
+    {
+        CaseParams p;
+        p.Nx      = m_inputs[0].getInt(32);
+        p.Ny      = m_inputs[1].getInt(32);
+        p.Re      = m_inputs[2].getDouble(100.0);
+        p.maxIter = m_inputs[3].getInt(3000);
+        return p;
+    }
+
     void setRunning(bool running) { m_running = running; }
 
     void update(float dt, sf::Vector2f mousePos)
@@ -134,20 +166,31 @@ public:
             btn.update(dt);
             btn.onMouseMove(mousePos);
         }
+        for (auto& btn : m_modeBtns) {
+            btn.update(dt);
+            btn.onMouseMove(mousePos);
+        }
         m_runBtn.update(dt);
         m_runBtn.onMouseMove(mousePos);
+
+        for (auto& inp : m_inputs) inp.onMouseMove(mousePos);
+
+        m_blinkTimer += dt;
+        if (m_blinkTimer > 1.f) m_blinkTimer -= 1.f;
     }
 
-    void handleEvent(const sf::Event& event)
+    void handleEvent(const sf::Event& event, const sf::RenderWindow& window)
     {
         if (const auto* mp = event.getIf<sf::Event::MouseButtonPressed>()) {
-            const sf::Vector2f pos{static_cast<float>(mp->position.x),
-                                   static_cast<float>(mp->position.y)};
+            const sf::Vector2f pos = window.mapPixelToCoords(mp->position);
             for (int i = 0; i < static_cast<int>(m_caseBtns.size()); ++i) {
                 if (m_caseBtns[static_cast<std::size_t>(i)].onMousePress(pos)) {
                     m_selectedCase = i;
                     for (auto& b : m_caseBtns) b.selected = false;
                     m_caseBtns[static_cast<std::size_t>(i)].selected = true;
+                    if (!m_caseDefaults.empty() &&
+                        static_cast<std::size_t>(i) < m_caseDefaults.size())
+                        applyParams(m_caseDefaults[static_cast<std::size_t>(i)]);
                     if (onCaseSelected) onCaseSelected(i);
                 }
             }
@@ -155,12 +198,36 @@ public:
                 if (m_running) { if (onStopPressed) onStopPressed(); }
                 else           { if (onRunPressed)  onRunPressed();  }
             }
+            const DisplayMode modes[] = {
+                DisplayMode::Pressure, DisplayMode::Velocity, DisplayMode::Streamlines};
+            for (int i = 0; i < static_cast<int>(m_modeBtns.size()); ++i) {
+                if (m_modeBtns[static_cast<std::size_t>(i)].onMousePress(pos)) {
+                    m_displayMode = modes[i];
+                    for (auto& b : m_modeBtns) b.selected = false;
+                    m_modeBtns[static_cast<std::size_t>(i)].selected = true;
+                    if (onModeSelected) onModeSelected(m_displayMode);
+                }
+            }
+            // TextInput focus handling — blur all then let the clicked one focus
+            bool anyFocused = false;
+            for (auto& inp : m_inputs) {
+                if (inp.onMousePress(pos)) anyFocused = true;
+            }
+            // If a different input was clicked, the others are already blurred
+            // because onMousePress() sets focused = contains(pos).
+            (void)anyFocused;
         }
         if (const auto* mm = event.getIf<sf::Event::MouseMoved>()) {
-            const sf::Vector2f pos{static_cast<float>(mm->position.x),
-                                   static_cast<float>(mm->position.y)};
+            const sf::Vector2f pos = window.mapPixelToCoords(mm->position);
             for (auto& btn : m_caseBtns) btn.onMouseMove(pos);
+            for (auto& btn : m_modeBtns) btn.onMouseMove(pos);
             m_runBtn.onMouseMove(pos);
+        }
+        if (const auto* te = event.getIf<sf::Event::TextEntered>()) {
+            for (auto& inp : m_inputs) inp.handleText(te->unicode);
+        }
+        if (const auto* kp = event.getIf<sf::Event::KeyPressed>()) {
+            for (auto& inp : m_inputs) inp.handleKey(kp->code);
         }
     }
 
@@ -193,7 +260,7 @@ public:
                          UILayout::SideY + UILayout::Pad + 22.f});
         target.draw(sub);
 
-        // Section label
+        // Section label — cases
         sf::Text lbl(m_font, "CASES", 10u);
         lbl.setFillColor(UIColors::TextMuted);
         lbl.setPosition({UILayout::SideX + UILayout::Pad,
@@ -202,6 +269,26 @@ public:
 
         // Case buttons
         for (const auto& btn : m_caseBtns)
+            btn.draw(target, m_font);
+
+        // Section label — params
+        sf::Text plbl(m_font, "PARAMS", 10u);
+        plbl.setFillColor(UIColors::TextMuted);
+        plbl.setPosition({UILayout::SideX + UILayout::Pad, m_paramsLabelY});
+        target.draw(plbl);
+
+        // Parameter inputs
+        for (const auto& inp : m_inputs)
+            inp.draw(target, m_font, m_blinkTimer);
+
+        // Section label — display mode
+        sf::Text dlbl(m_font, "DISPLAY", 10u);
+        dlbl.setFillColor(UIColors::TextMuted);
+        dlbl.setPosition({UILayout::SideX + UILayout::Pad, m_displayLabelY});
+        target.draw(dlbl);
+
+        // Display mode buttons
+        for (const auto& btn : m_modeBtns)
             btn.draw(target, m_font);
 
         // Run/Stop button
@@ -214,33 +301,88 @@ public:
     }
 
 private:
-    const sf::Font&       m_font;
-    std::vector<std::string> m_caseNames;
-    std::vector<Button>   m_caseBtns;
-    Button                m_runBtn;
-    int                   m_selectedCase = 0;
-    bool                  m_running      = false;
+    const sf::Font&           m_font;
+    std::vector<std::string>  m_caseNames;
+    std::vector<Button>       m_caseBtns;
+    std::vector<Button>       m_modeBtns;
+    Button                    m_runBtn;
+    std::array<TextInput, 4>  m_inputs;
+    std::vector<CaseParams>   m_caseDefaults;
+    int                       m_selectedCase  = 0;
+    bool                      m_running       = false;
+    DisplayMode               m_displayMode   = DisplayMode::Pressure;
+    float                     m_displayLabelY = 0.f;
+    float                     m_paramsLabelY  = 0.f;
+    float                     m_blinkTimer    = 0.f;
+
+    void applyParams(const CaseParams& p)
+    {
+        m_inputs[0].setValue(p.Nx);
+        m_inputs[1].setValue(p.Ny);
+        m_inputs[2].setValue(p.Re);
+        m_inputs[3].setValue(p.maxIter);
+    }
 
     void rebuild()
     {
         m_caseBtns.clear();
+        m_modeBtns.clear();
 
-        float y = UILayout::SideY + 84.f;
         const float bx = UILayout::SideX + UILayout::Pad;
         const float bw = UILayout::SideW - 2.f * UILayout::Pad;
+        constexpr float ModeH   = 34.f;
+        constexpr float InputH  = 26.f;
+        constexpr float InputGap =  5.f;
 
+        // Case buttons
+        float y = UILayout::SideY + 84.f;
         for (std::size_t i = 0; i < m_caseNames.size(); ++i) {
             Button btn;
-            btn.bounds    = {{bx, y}, {bw, UILayout::BtnH}};
-            btn.label     = m_caseNames[i];
-            btn.fillBase  = UIColors::SurfaceHigh;
+            btn.bounds     = {{bx, y}, {bw, UILayout::BtnH}};
+            btn.label      = m_caseNames[i];
+            btn.fillBase   = UIColors::SurfaceHigh;
             btn.fillActive = UIColors::AccentDim;
-            btn.selected  = (static_cast<int>(i) == m_selectedCase);
+            btn.selected   = (static_cast<int>(i) == m_selectedCase);
             m_caseBtns.push_back(btn);
             y += UILayout::BtnH + UILayout::Gap;
         }
 
-        // Run button at bottom of side panel
+        // PARAMS section
+        m_paramsLabelY = y + UILayout::Gap;
+        y = m_paramsLabelY + 16.f;
+
+        const char* inputLabels[] = {"Nx", "Ny", "Re", "Max Iter"};
+        const bool  inputIntOnly[] = {true, true, false, true};
+        for (int i = 0; i < 4; ++i) {
+            m_inputs[static_cast<std::size_t>(i)].bounds  = {{bx, y}, {bw, InputH}};
+            m_inputs[static_cast<std::size_t>(i)].label   = inputLabels[i];
+            m_inputs[static_cast<std::size_t>(i)].intOnly = inputIntOnly[i];
+            y += InputH + InputGap;
+        }
+
+        // Apply defaults for the selected case if available
+        if (!m_caseDefaults.empty() &&
+            static_cast<std::size_t>(m_selectedCase) < m_caseDefaults.size())
+            applyParams(m_caseDefaults[static_cast<std::size_t>(m_selectedCase)]);
+
+        // Display mode buttons
+        m_displayLabelY = y + UILayout::Gap;
+        y = m_displayLabelY + 16.f;
+        const char* modeLabels[] = {"Pressure", "Velocity", "Streamlines"};
+        const DisplayMode modes[] = {
+            DisplayMode::Pressure, DisplayMode::Velocity, DisplayMode::Streamlines};
+        for (int i = 0; i < 3; ++i) {
+            Button btn;
+            btn.bounds     = {{bx, y}, {bw, ModeH}};
+            btn.label      = modeLabels[i];
+            btn.fillBase   = UIColors::SurfaceHigh;
+            btn.fillActive = UIColors::AccentDim;
+            btn.selected   = (modes[i] == m_displayMode);
+            m_modeBtns.push_back(btn);
+            y += ModeH + UILayout::Gap;
+        }
+
+        // Run button at bottom
         const float runY = UILayout::SideY + UILayout::SideH
                          - UILayout::BtnH - UILayout::Pad;
         m_runBtn.bounds    = {{bx, runY}, {bw, UILayout::BtnH}};

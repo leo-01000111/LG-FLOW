@@ -33,11 +33,27 @@ void BoundaryCondition::applyVelocity(Field<Eigen::Vector2d>& velocityField,
     //   WALL / INLET  → Dirichlet: set boundary cell to patch.value
     //   OUTLET / SYMMETRY → zero-gradient: leave boundary cell unchanged
 
+    // Helper: apply Poiseuille profile u(y)=6·U_avg·y·(Ly-y)/Ly² on a column.
+    // Ly is recovered from the first and last cell-centre y-coordinates.
+    auto applyPoiseuille = [&](int col, double uAvg) {
+        // Cell centres: y_j = (j+0.5)*dy, so Ly = y_0 + y_{Ny-1} = dy/2 + Ly-dy/2
+        const double y0   = mesh.getCellCenter(col, 0).y();
+        const double yLast= mesh.getCellCenter(col, Ny - 1).y();
+        const double Ly   = y0 + yLast;          // = Ly_domain (exact for uniform grid)
+        for (int j = 0; j < Ny; ++j) {
+            const double y  = mesh.getCellCenter(col, j).y();
+            const double ux = 6.0 * uAvg * y * (Ly - y) / (Ly * Ly);
+            velocityField(col, j) = Eigen::Vector2d(ux, 0.0);
+        }
+    };
+
     if (auto it = m_patches.find("left"); it != m_patches.end()) {
         const BoundaryPatch& p = it->second;
         if (p.type == BoundaryType::WALL || p.type == BoundaryType::INLET) {
             for (int j = 0; j < Ny; ++j)
                 velocityField(0, j) = p.value;
+        } else if (p.type == BoundaryType::PARABOLIC_INLET) {
+            applyPoiseuille(0, p.value.x());
         }
     }
 
@@ -46,6 +62,8 @@ void BoundaryCondition::applyVelocity(Field<Eigen::Vector2d>& velocityField,
         if (p.type == BoundaryType::WALL || p.type == BoundaryType::INLET) {
             for (int j = 0; j < Ny; ++j)
                 velocityField(Nx - 1, j) = p.value;
+        } else if (p.type == BoundaryType::PARABOLIC_INLET) {
+            applyPoiseuille(Nx - 1, p.value.x());
         }
     }
 

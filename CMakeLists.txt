@@ -62,6 +62,13 @@ set(FLOWCORE_SOURCES
     src/io/VTKWriter.cpp
     src/utils/Logger.cpp
     src/utils/Config.cpp
+    src/mesh/UnstructuredMesh.cpp
+    src/mesh/UnstructuredBoundaryCondition.cpp
+    src/io/GmshReader.cpp
+    src/solver/UnstructuredDiscretization.cpp
+    src/solver/UnstructuredNavierStokesSolver.cpp
+    src/solver/WallDistance.cpp
+    src/solver/SpallartAllmaras.cpp
 )
 
 # ── Library target (shared by solver executable and tests) ───────────────────
@@ -84,23 +91,61 @@ add_executable(lgflow_validate_lid
     src/validate/lid_driven_cavity_validate.cpp)
 target_link_libraries(lgflow_validate_lid PRIVATE flowcore_lib)
 
+# ── Unstructured mesh validation executable ───────────────────────────────────
+add_executable(lgflow_unstruct src/validate/unstructured_channel_validate.cpp)
+target_link_libraries(lgflow_unstruct PRIVATE flowcore_lib)
+
+# ── Flat plate SA validation executable ──────────────────────────────────────
+add_executable(lgflow_flat_plate src/validate/flat_plate_sa_validate.cpp)
+target_link_libraries(lgflow_flat_plate PRIVATE flowcore_lib)
+
 # ── GUI executable (SFML) ────────────────────────────────────────────────────
 find_package(SFML 3 COMPONENTS Graphics Window System QUIET)
 if(SFML_FOUND)
     add_executable(lgflow_ui src/ui/main_ui.cpp)
     target_include_directories(lgflow_ui PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/ui)
+    # Embed the source directory so the exe can locate cases/ at runtime
+    # even when launched from an unrelated working directory.
+    target_compile_definitions(lgflow_ui PRIVATE
+        LGFLOW_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
     target_link_libraries(lgflow_ui PRIVATE
         flowcore_lib
         SFML::Graphics
         SFML::Window
         SFML::System)
-    # SFML 3 on Windows: copy DLLs next to the executable for Debug runs
+    # SFML 3 on Windows: copy DLLs next to the executable.
+    # $<TARGET_RUNTIME_DLLS> only captures direct link dependencies; SFML's
+    # transitive deps (freetype → brotli/bz2/libpng/zlib) must be copied
+    # separately via a glob over the vcpkg bin directory.
     if(WIN32)
         add_custom_command(TARGET lgflow_ui POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 $<TARGET_RUNTIME_DLLS:lgflow_ui>
                 $<TARGET_FILE_DIR:lgflow_ui>
             COMMAND_EXPAND_LISTS)
+        # Copy transitive DLL dependencies that TARGET_RUNTIME_DLLS misses.
+        # (SFML Graphics → freetype → brotli, bz2, libpng, zlib)
+        # A small CMake -P script avoids the file(GLOB)-vs-generator-expression
+        # evaluation-order problem: the script runs at build time with the
+        # correct config-specific vcpkg bin directory passed as a variable.
+        if(DEFINED VCPKG_INSTALLED_DIR)
+            file(WRITE "${CMAKE_BINARY_DIR}/copy_vcpkg_dlls.cmake" [[
+file(GLOB dlls "${VCPKG_BIN}/*.dll")
+foreach(dll ${dlls})
+    get_filename_component(name "${dll}" NAME)
+    set(dest "${DEST}/${name}")
+    if(NOT EXISTS "${dest}" OR "${dll}" IS_NEWER_THAN "${dest}")
+        file(COPY_FILE "${dll}" "${dest}" ONLY_IF_DIFFERENT)
+    endif()
+endforeach()
+]])
+            add_custom_command(TARGET lgflow_ui POST_BUILD
+                COMMAND ${CMAKE_COMMAND}
+                    "-DVCPKG_BIN=$<IF:$<CONFIG:Debug>,${VCPKG_INSTALLED_DIR}/x64-windows/debug/bin,${VCPKG_INSTALLED_DIR}/x64-windows/bin>"
+                    "-DDEST=$<TARGET_FILE_DIR:lgflow_ui>"
+                    -P "${CMAKE_BINARY_DIR}/copy_vcpkg_dlls.cmake"
+                COMMENT "Copying vcpkg transitive DLLs ($<CONFIG>)")
+        endif()
     endif()
     message(STATUS "LG-Flow: SFML UI target enabled (lgflow_ui)")
 else()

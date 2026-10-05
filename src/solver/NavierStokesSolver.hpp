@@ -4,7 +4,10 @@
 #include "core/Field.hpp"
 #include "core/Mesh.hpp"
 #include "io/VTKWriter.hpp"
+#include "solver/MomentumSolver.hpp"
 #include "solver/PressureSolver.hpp"
+#include "solver/SpallartAllmaras.hpp"
+#include "solver/WallDistance.hpp"
 #include "utils/Config.hpp"
 
 #include <Eigen/Dense>
@@ -152,13 +155,8 @@ public:
     [[nodiscard]] const Field<Eigen::Vector2d>& velocity() const;
 
 private:
-    // ── Convection scheme ─────────────────────────────────────────────────────
-    /// Convection discretization options.
-    /// CENTRAL: Gauss face-average (central differencing, 2nd order).
-    /// UPWIND:  Donor-cell (first-order upwind, unconditionally stable).
-    enum class ConvectionScheme { CENTRAL, UPWIND };
-
     // ── Config parameters (set in constructor, immutable after) ──────────────
+    // ConvectionScheme enum is defined in MomentumSolver.hpp (included above).
     int              m_cfgNx{16};
     int              m_cfgNy{16};
     double           m_cfgLx{1.0};
@@ -196,7 +194,19 @@ private:
     /// Pressure solver; empty until initialize() (requires loaded mesh).
     std::optional<PressureSolver> m_pressureSolver;
 
+    /// Momentum solver; empty until initialize() (requires loaded mesh).
+    std::optional<MomentumSolver> m_momentumSolver;
+
     VTKWriter m_vtkWriter;  ///< VTK output writer (stub until Milestone 2).
+
+    // ── SA turbulence model (only active when solver.turbulence = SA) ─────────
+    bool                            m_useSA{false};
+    double                          m_nuTildeFreestream{0.0}; ///< ν̃ at inflow, default 3·ν
+    double                          m_alphaNu{0.7};           ///< ν̃ under-relaxation
+    std::optional<Field<double>>    m_wallDist;               ///< Wall distance [m]
+    std::optional<Field<double>>    m_nuTilde;                ///< SA transported variable [m²/s]
+    std::optional<Field<double>>    m_nuT;                    ///< Turbulent viscosity ν_t [m²/s]
+    std::optional<SpallartAllmaras> m_saModel;
 
     /**
      * @brief Guards all methods that require prior initialization.

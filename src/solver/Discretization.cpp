@@ -95,6 +95,92 @@ Discretization::gradient(const Field<double>& field, const Mesh& mesh)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// divergenceRhieChow — Rhie-Chow (1983) face-interpolated divergence
+// Prevents checkerboard pressure oscillations on collocated grids by replacing
+// the linearly-interpolated face velocity with a compact-gradient-corrected value.
+// Reference: Rhie & Chow (1983); Ferziger, Perić & Street (2020) Section 7.5.
+// ─────────────────────────────────────────────────────────────────────────────
+Field<double>
+Discretization::divergenceRhieChow(const Field<Eigen::Vector2d>& velocity,
+                                    const Field<double>&          pressure,
+                                    const Mesh&                   mesh,
+                                    double                        dt,
+                                    double                        rho)
+{
+    if (&velocity.mesh() != &mesh)
+        throw std::invalid_argument(
+            "Discretization::divergenceRhieChow: velocity field is not on the supplied mesh");
+    if (&pressure.mesh() != &mesh)
+        throw std::invalid_argument(
+            "Discretization::divergenceRhieChow: pressure field is not on the supplied mesh");
+
+    // Cell-centre pressure gradients for face interpolation.
+    // Used in the RC correction: 0.5*(∇p_P + ∇p_N) · n̂_f.
+    const Field<Eigen::Vector2d> gradP = gradient(pressure, mesh);
+
+    Field<double> result(mesh, 0.0);
+    const int     nFaces     = mesh.numFaces();
+    const int     Ny         = mesh.Ny();
+    const double  dtOverRho  = dt / rho;
+
+    for (int f = 0; f < nFaces; ++f)
+    {
+        const auto [owner, neighbour] = mesh.getNeighbors(f);
+        const Eigen::Vector2d n = mesh.getFaceNormal(f);  // outward unit normal (owner → neighbour)
+        const double          A = mesh.getFaceArea(f);
+
+        double faceFlux;
+
+        if (neighbour == -1)
+        {
+            // Boundary face: use owner velocity (zero-gradient; same as divergence()).
+            faceFlux = velocity[owner].dot(n) * A;
+        }
+        else
+        {
+            // Interior face: apply Rhie-Chow correction.
+            //
+            // Linearly interpolated normal face velocity:
+            //   ū_f · n̂ = 0.5*(u_P + u_N) · n̂
+            const double uBar_dot_n =
+                0.5 * (velocity[owner] + velocity[neighbour]).dot(n);
+
+            // Compact face pressure gradient in the face-normal direction:
+            //   (p_N − p_P) / |x_N − x_P|
+            // The sign is positive when pressure increases in the n̂ direction.
+            const int io  = owner    / Ny;
+            const int jo  = owner    % Ny;
+            const int in_ = neighbour / Ny;
+            const int jn  = neighbour % Ny;
+
+            const Eigen::Vector2d xo   = mesh.getCellCenter(io,  jo);
+            const Eigen::Vector2d xn   = mesh.getCellCenter(in_, jn);
+            const double          dist = (xn - xo).norm();
+
+            const double compactGrad =
+                (pressure[neighbour] - pressure[owner]) / dist;
+
+            // Face-interpolated cell-centre gradient (projected on n̂):
+            //   0.5*(∇p_P + ∇p_N) · n̂
+            const double interpGrad =
+                0.5 * (gradP[owner] + gradP[neighbour]).dot(n);
+
+            // Rhie-Chow correction: subtract (dt/ρ) * (compact − interp).
+            // The compact gradient sees the checkerboard; the interpolated gradient
+            // does not.  The difference damps decoupled pressure modes.
+            const double rcFaceVel = uBar_dot_n - dtOverRho * (compactGrad - interpGrad);
+            faceFlux = rcFaceVel * A;
+        }
+
+        result[owner] += faceFlux / mesh.getCellVolume(owner);
+        if (neighbour != -1)
+            result[neighbour] -= faceFlux / mesh.getCellVolume(neighbour);
+    }
+
+    return result;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // laplacian  ∇²φ ≈ (1/V) Σ_f (∂φ/∂n_f) A_f   — Ferziger & Perić eq. 4.22
 // Compact two-point stencil on interior faces; zero contribution at boundaries.
 // ─────────────────────────────────────────────────────────────────────────────

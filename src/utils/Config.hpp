@@ -64,6 +64,13 @@ public:
      */
     [[nodiscard]] bool has(const std::string& key) const;
 
+    /**
+     * @brief Inserts or overwrites a key with the string representation of value.
+     * @tparam T Any type streamable to std::ostringstream.
+     */
+    template <typename T>
+    void set(const std::string& key, const T& value);
+
 private:
     std::unordered_map<std::string, std::string> m_entries;
 };
@@ -92,4 +99,12 @@ T Config::get(const std::string& key, const T& defaultValue) const
         return defaultValue;
 
     return get<T>(key);
+}
+
+template <typename T>
+void Config::set(const std::string& key, const T& value)
+{
+    std::ostringstream ss;
+    ss << value;
+    m_entries[key] = ss.str();
 }

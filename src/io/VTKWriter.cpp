@@ -3,6 +3,7 @@
 #include <fstream>
 #include <iomanip>
 #include <stdexcept>
+#include <string>
 
 // Reference: VTK XML File Formats, version 0.1
 //   https://vtk.org/wp-content/uploads/2015/04/file-formats.pdf
@@ -122,4 +123,98 @@ void VTKWriter::write(const std::string&            filename,
     out << "    </Piece>\n";
     out << "  </UnstructuredGrid>\n";
     out << "</VTKFile>\n";
+}
+
+// ── Unstructured mesh overload ────────────────────────────────────────────────
+// ASCII legacy VTK DATASET UNSTRUCTURED_GRID.
+// Cell types: 5 = VTK_TRIANGLE, 9 = VTK_QUAD.
+// Reference: VTK File Formats, Section 2 (Legacy Formats).
+
+void VTKWriter::write(const std::string&                        filename,
+                      const UnstructuredMesh&                   mesh,
+                      const UnstructuredField<double>&          pressureField,
+                      const UnstructuredField<Eigen::Vector2d>& velocityField)
+{
+    static constexpr int VTK_TRIANGLE = 5;
+    static constexpr int VTK_QUAD     = 9;
+
+    const int Nn = mesh.numNodes();
+    const int Nc = mesh.numCells();
+
+    if (pressureField.size() != Nc)
+        throw std::invalid_argument(
+            "VTKWriter::write(unstructured): pressure field size ("
+            + std::to_string(pressureField.size())
+            + ") does not match mesh cell count ("
+            + std::to_string(Nc) + ")");
+
+    if (velocityField.size() != Nc)
+        throw std::invalid_argument(
+            "VTKWriter::write(unstructured): velocity field size ("
+            + std::to_string(velocityField.size())
+            + ") does not match mesh cell count ("
+            + std::to_string(Nc) + ")");
+
+    std::ofstream out(filename);
+    if (!out.is_open())
+        throw std::runtime_error(
+            "VTKWriter::write(unstructured): cannot create file: " + filename);
+
+    out << std::scientific << std::setprecision(8);
+
+    // Header
+    out << "# vtk DataFile Version 3.0\n";
+    out << "LG-Flow Unstructured\n";
+    out << "ASCII\n";
+    out << "DATASET UNSTRUCTURED_GRID\n";
+
+    // Nodes
+    out << "POINTS " << Nn << " float\n";
+    for (int ni = 0; ni < Nn; ++ni)
+    {
+        const Eigen::Vector2d& pos = mesh.node(NodeId{ni}).position;
+        out << pos.x() << " " << pos.y() << " 0.0\n";
+    }
+
+    // Count total integers in connectivity list (1 count + nodeIds per cell).
+    int totalInts = 0;
+    for (int ci = 0; ci < Nc; ++ci)
+        totalInts += 1 + static_cast<int>(mesh.cell(CellId{ci}).nodes.size());
+
+    out << "CELLS " << Nc << " " << totalInts << "\n";
+    for (int ci = 0; ci < Nc; ++ci)
+    {
+        const MeshCell& c = mesh.cell(CellId{ci});
+        out << static_cast<int>(c.nodes.size());
+        for (NodeId nid : c.nodes)
+            out << " " << toInt(nid);
+        out << "\n";
+    }
+
+    out << "CELL_TYPES " << Nc << "\n";
+    for (int ci = 0; ci < Nc; ++ci)
+    {
+        const MeshCell& c = mesh.cell(CellId{ci});
+        const int nNodes = static_cast<int>(c.nodes.size());
+        if (nNodes == 3)
+            out << VTK_TRIANGLE << "\n";
+        else
+            out << VTK_QUAD << "\n";
+    }
+
+    out << "CELL_DATA " << Nc << "\n";
+
+    // Pressure scalar field
+    out << "SCALARS pressure float 1\n";
+    out << "LOOKUP_TABLE default\n";
+    for (int ci = 0; ci < Nc; ++ci)
+        out << pressureField[CellId{ci}] << "\n";
+
+    // Velocity vector field (3-component with z=0)
+    out << "VECTORS velocity float\n";
+    for (int ci = 0; ci < Nc; ++ci)
+    {
+        const Eigen::Vector2d& v = velocityField[CellId{ci}];
+        out << v.x() << " " << v.y() << " 0.0\n";
+    }
 }

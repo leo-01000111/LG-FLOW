@@ -1,3 +1,5 @@
+#include "Colormap.hpp"
+#include "FieldView.hpp"
 #include "ResidualPlot.hpp"
 #include "SidePanel.hpp"
 #include "StatusBar.hpp"
@@ -9,6 +11,7 @@
 #include "utils/Logger.hpp"
 
 #include <SFML/Graphics.hpp>
+#include <SFML/Graphics/View.hpp>
 #include <SFML/Window/VideoMode.hpp>
 
 #include <atomic>
@@ -19,9 +22,15 @@
 #include <thread>
 #include <vector>
 
+// ── CaseOverrides ─────────────────────────────────────────────────────────────
+struct CaseOverrides {
+    int    Nx      = 0;    // 0 = use config default
+    int    Ny      = 0;
+    double Re      = 0.0;  // 0.0 = use config default
+    int    maxIter = 0;
+};
+
 // ── SolverState ───────────────────────────────────────────────────────────────
-// Shared between the UI thread and the solver thread. All fields accessed
-// from both threads are protected by mutex or are atomic.
 struct SolverState
 {
     std::mutex              mtx;
@@ -32,14 +41,16 @@ struct SolverState
     int                     iteration = 0;
     bool                    converged = false;
 
+    FieldSnapshot           fieldSnap;
+    bool                    snapReady = false;
+
     std::atomic<bool>       stopRequest{false};
     std::atomic<bool>       running{false};
 };
 
 // ── solverThread ──────────────────────────────────────────────────────────────
-// Runs the SIMPLE loop in a background thread. Posts residuals to SolverState
-// after every step so the UI can display live convergence.
-static void solverThread(const std::string& configPath, SolverState* state)
+static void solverThread(const std::string& configPath, SolverState* state,
+                         CaseOverrides ov)
 {
     state->running.store(true);
     state->stopRequest.store(false);
@@ -48,8 +59,22 @@ static void solverThread(const std::string& configPath, SolverState* state)
         Config cfg;
         cfg.load(configPath);
 
-        const int maxIter = cfg.get<int>("solver.max_iter", 3000);
-        const double tol  = cfg.get<double>("solver.tolerance", 1e-5);
+        // Apply UI overrides before constructing the solver
+        if (ov.Nx > 0)      cfg.set("mesh.Nx",        ov.Nx);
+        if (ov.Ny > 0)      cfg.set("mesh.Ny",        ov.Ny);
+        if (ov.Re > 0.0) {
+            // Re = U_ref * Ly / nu; U_ref = 1.0 for all current cases
+            const double Ly = cfg.get<double>("mesh.Ly", 1.0);
+            cfg.set("solver.nu", Ly / ov.Re);
+        }
+        if (ov.maxIter > 0) cfg.set("solver.max_iter", ov.maxIter);
+
+        const int    maxIter = cfg.get<int>("solver.max_iter", 3000);
+        const double tol     = cfg.get<double>("solver.tolerance", 1e-5);
+        const int    Nx      = cfg.get<int>("mesh.Nx", 16);
+        const int    Ny      = cfg.get<int>("mesh.Ny", 16);
+        const float  Lx      = static_cast<float>(cfg.get<double>("mesh.Lx", 1.0));
+        const float  Ly      = static_cast<float>(cfg.get<double>("mesh.Ly", 1.0));
 
         NavierStokesSolver solver(cfg);
         solver.initialize();
@@ -62,6 +87,7 @@ static void solverThread(const std::string& configPath, SolverState* state)
             const double vel  = solver.velocityResidual();
             const double cont = solver.continuityResidual();
 
+            // Post residuals every step
             {
                 std::lock_guard<std::mutex> lk(state->mtx);
                 state->velHistory.push_back(vel);
@@ -69,6 +95,36 @@ static void solverThread(const std::string& configPath, SolverState* state)
                 state->lastVel   = vel;
                 state->lastCont  = cont;
                 state->iteration = iter + 1;
+            }
+
+            // Post field snapshot every 25 iterations or on convergence
+            const bool doSnap = (iter % 25 == 0) || (vel < tol);
+            if (doSnap) {
+                const auto& p = solver.pressure();
+                const auto& u = solver.velocity();
+
+                FieldSnapshot snap;
+                snap.Nx = Nx;
+                snap.Ny = Ny;
+                snap.Lx = Lx;
+                snap.Ly = Ly;
+                snap.pressure.resize(static_cast<std::size_t>(Nx * Ny));
+                snap.velX.resize(static_cast<std::size_t>(Nx * Ny));
+                snap.velY.resize(static_cast<std::size_t>(Nx * Ny));
+
+                for (int i = 0; i < Nx; ++i) {
+                    for (int j = 0; j < Ny; ++j) {
+                        const std::size_t k = static_cast<std::size_t>(i * Ny + j);
+                        snap.pressure[k] = static_cast<float>(p(i, j));
+                        snap.velX[k]     = static_cast<float>(u(i, j).x());
+                        snap.velY[k]     = static_cast<float>(u(i, j).y());
+                    }
+                }
+                snap.valid = true;
+
+                std::lock_guard<std::mutex> lk(state->mtx);
+                state->fieldSnap  = std::move(snap);
+                state->snapReady  = true;
             }
 
             if (vel < tol) {
@@ -84,10 +140,52 @@ static void solverThread(const std::string& configPath, SolverState* state)
     state->running.store(false);
 }
 
-// ── main ──────────────────────────────────────────────────────────────────────
-int main()
+// ── letterboxView ─────────────────────────────────────────────────────────────
+// Returns a view that maps the fixed logical canvas (WindowW × WindowH) into
+// the actual window, maintaining aspect ratio with black bars if necessary.
+static sf::View letterboxView(sf::Vector2u winSize)
 {
-    // Discover available cases
+    const float logW = UILayout::WindowW;
+    const float logH = UILayout::WindowH;
+    const float winW = static_cast<float>(winSize.x);
+    const float winH = static_cast<float>(winSize.y);
+
+    const float scale = std::min(winW / logW, winH / logH);
+    const float vpW   = logW * scale / winW;
+    const float vpH   = logH * scale / winH;
+    const float vpX   = (1.f - vpW) * 0.5f;
+    const float vpY   = (1.f - vpH) * 0.5f;
+
+    sf::View view(sf::FloatRect{{0.f, 0.f}, {logW, logH}});
+    view.setViewport(sf::FloatRect{{vpX, vpY}, {vpW, vpH}});
+    return view;
+}
+
+// ── main ──────────────────────────────────────────────────────────────────────
+int main(int /*argc*/, char* argv[])
+{
+    // Resolve working directory so relative paths like "cases/..." work.
+    {
+        namespace fs = std::filesystem;
+        try {
+            if (fs::exists("cases"))
+                ;
+#ifdef LGFLOW_SOURCE_DIR
+            else if (fs::exists(fs::path(LGFLOW_SOURCE_DIR) / "cases"))
+                fs::current_path(LGFLOW_SOURCE_DIR);
+#endif
+            else {
+                fs::path dir = fs::canonical(fs::path(argv[0])).parent_path();
+                for (int d = 0; d < 8; ++d) {
+                    if (fs::exists(dir / "cases")) { fs::current_path(dir); break; }
+                    const fs::path up = dir.parent_path();
+                    if (up == dir) break;
+                    dir = up;
+                }
+            }
+        } catch (...) {}
+    }
+
     const std::vector<std::pair<std::string,std::string>> cases = {
         {"Lid-Driven Cavity Re=100", "cases/lid_driven_cavity/case_validate.cfg"},
         {"Channel Flow Re=100",      "cases/channel_flow/case.cfg"},
@@ -108,45 +206,45 @@ int main()
         sf::State::Windowed,
         settings);
     window.setFramerateLimit(60);
+    window.setView(letterboxView(window.getSize()));
 
-    // Font — attempt to load system font, fall back gracefully
+    // Font
     sf::Font font;
-    const std::vector<std::string> fontPaths = {
-        "C:/Windows/Fonts/consola.ttf",
-        "C:/Windows/Fonts/arial.ttf",
-        "C:/Windows/Fonts/segoeui.ttf",
-    };
     bool fontLoaded = false;
-    for (const auto& fp : fontPaths) {
+    for (const auto& fp : std::vector<std::string>{
+            "C:/Windows/Fonts/consola.ttf",
+            "C:/Windows/Fonts/arial.ttf",
+            "C:/Windows/Fonts/segoeui.ttf"}) {
         if (std::filesystem::exists(fp)) {
             if (font.openFromFile(fp)) { fontLoaded = true; break; }
         }
     }
-    if (!fontLoaded) {
-        // Use SFML default font if none found
+    if (!fontLoaded)
         Logger::get().warn("No system font found; text may not render.");
-    }
 
     // UI widgets
-    SidePanel    sidePanel(font);
-    StatusBar    statusBar(font);
+    SidePanel       sidePanel(font);
+    StatusBar       statusBar(font);
+    FieldViewWidget fieldWidget(font);
     const sf::FloatRect plotBounds{
         {UILayout::PlotX, UILayout::PlotY},
         {UILayout::PlotW, UILayout::PlotH}};
     ResidualPlot plot(plotBounds, font);
 
     sidePanel.setCases(caseNames);
+    sidePanel.setCaseDefaults({
+        {32, 32,  100.0, 3000},   // Lid-Driven Cavity
+        {64, 16,  100.0, 3000},   // Channel Flow
+    });
 
     // State
     SolverState  state;
     std::thread  solverThr;
     int          selectedCase = 0;
-    bool         prevRunning  = false;
 
-    // Wire callbacks
+    // Callbacks
     sidePanel.onCaseSelected = [&](int idx) {
         selectedCase = idx;
-        // Reset plot when case changes
         std::lock_guard<std::mutex> lk(state.mtx);
         state.velHistory.clear();
         state.contHistory.clear();
@@ -154,6 +252,7 @@ int main()
         state.lastCont  = 0.0;
         state.iteration = 0;
         state.converged = false;
+        state.snapReady = false;
         plot.clear();
     };
 
@@ -167,15 +266,26 @@ int main()
             state.lastCont  = 0.0;
             state.iteration = 0;
             state.converged = false;
+            state.snapReady = false;
         }
         plot.clear();
+        const auto params = sidePanel.getParams();
+        CaseOverrides ov;
+        ov.Nx      = params.Nx;
+        ov.Ny      = params.Ny;
+        ov.Re      = params.Re;
+        ov.maxIter = params.maxIter;
         const std::string cfgPath = cases[static_cast<std::size_t>(selectedCase)].second;
         if (solverThr.joinable()) solverThr.join();
-        solverThr = std::thread(solverThread, cfgPath, &state);
+        solverThr = std::thread(solverThread, cfgPath, &state, ov);
     };
 
     sidePanel.onStopPressed = [&]() {
         state.stopRequest.store(true);
+    };
+
+    sidePanel.onModeSelected = [&](DisplayMode mode) {
+        fieldWidget.setMode(mode);
     };
 
     sf::Clock clock;
@@ -183,63 +293,71 @@ int main()
     while (window.isOpen()) {
         const float dt = clock.restart().asSeconds();
 
-        // Events
         while (const std::optional<sf::Event> event = window.pollEvent()) {
             if (event->is<sf::Event::Closed>()) {
                 state.stopRequest.store(true);
                 if (solverThr.joinable()) solverThr.join();
                 window.close();
             }
-            sidePanel.handleEvent(*event);
+            if (const auto* resized = event->getIf<sf::Event::Resized>()) {
+                window.setView(letterboxView(resized->size));
+            }
+            sidePanel.handleEvent(*event, window);
         }
 
         const bool running = state.running.load();
         sidePanel.setRunning(running);
 
-        // Update plot with any new data
+        // Update plot with new residual data
         {
             std::lock_guard<std::mutex> lk(state.mtx);
-            const std::size_t plotted = [&] {
-                // Count how many we've already pushed (approximate via deque size)
-                // Simple approach: push everything since last frame.
-                // We track last seen index.
-                static std::size_t lastIdx = 0;
-                const std::size_t sz = state.velHistory.size();
-                for (std::size_t i = lastIdx; i < sz; ++i)
-                    plot.push(state.velHistory[i], state.contHistory[i]);
-                lastIdx = sz;
-                return sz;
-            }();
-            (void)plotted;
+            static std::size_t lastIdx = 0;
+            const std::size_t sz = state.velHistory.size();
+            for (std::size_t i = lastIdx; i < sz; ++i)
+                plot.push(state.velHistory[i], state.contHistory[i]);
+            lastIdx = sz;
         }
 
-        // Read status for display
+        // Pull new field snapshot (outside lock for rebuild)
+        {
+            FieldSnapshot localSnap;
+            bool hasNew = false;
+            {
+                std::lock_guard<std::mutex> lk(state.mtx);
+                if (state.snapReady) {
+                    localSnap = state.fieldSnap;
+                    state.snapReady = false;
+                    hasNew = true;
+                }
+            }
+            if (hasNew)
+                fieldWidget.setSnapshot(localSnap);
+        }
+
+        // Read status
         double vel = 0, cont = 0;
         int iter = 0;
         bool converged = false;
         {
             std::lock_guard<std::mutex> lk(state.mtx);
-            vel      = state.lastVel;
-            cont     = state.lastCont;
-            iter     = state.iteration;
+            vel       = state.lastVel;
+            cont      = state.lastCont;
+            iter      = state.iteration;
             converged = state.converged;
         }
         statusBar.update(iter, vel, cont, running, converged);
 
-        // Mouse pos for hover animation
-        const sf::Vector2i mp = sf::Mouse::getPosition(window);
-        const sf::Vector2f mousePos{static_cast<float>(mp.x),
-                                    static_cast<float>(mp.y)};
+        const sf::Vector2f mousePos = window.mapPixelToCoords(sf::Mouse::getPosition(window));
         sidePanel.update(dt, mousePos);
 
         // Draw
-        window.clear(UIColors::Background);
+        window.clear(sf::Color{8, 8, 12, 255});   // letterbox bars (darker than Background)
         sidePanel.draw(window);
         statusBar.draw(window);
+        fieldWidget.draw(window, {{UILayout::FieldX, UILayout::FieldY},
+                                  {UILayout::FieldW, UILayout::FieldH}});
         plot.draw(window);
         window.display();
-
-        prevRunning = running;
     }
 
     state.stopRequest.store(true);

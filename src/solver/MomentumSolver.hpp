@@ -71,6 +71,34 @@ public:
                ConvectionScheme              scheme,
                double                        alphaU = 1.0);
 
+    /** @brief Solves the momentum predictor with spatially varying effective viscosity.
+     *
+     *  Same as the scalar-nu overload but the face diffusion coefficient uses
+     *  cell-averaged nu_eff = (nuEff[owner] + nuEff[neighbour]) / 2 per face.
+     *  Used when the SA turbulence model provides a non-uniform ν_t field.
+     *
+     *  Reference: Ferziger, Perić & Street (2020) §7.4 with variable ν_eff.
+     *
+     *  @param nuEffField  Effective kinematic viscosity ν + ν_t per cell [m²/s].
+     *  @param uStar       Output: intermediate velocity u* (written in place).
+     *  @param uOld        Velocity field u^k from the previous SIMPLE iteration.
+     *  @param pressure    Pressure field p^k from the previous SIMPLE iteration.
+     *  @param dt          Effective time step [s]. Must be > 0.
+     *  @param rho         Fluid density [kg/m³]. Must be > 0.
+     *  @param scheme      Convection scheme (UPWIND or CENTRAL).
+     *  @param alphaU      Velocity under-relaxation factor in (0, 1]. Default 1.0.
+     *  @throws std::invalid_argument on bad parameter values.
+     *  @throws std::runtime_error if the linear solve fails or produces non-finite values.
+     */
+    void solve(Field<Eigen::Vector2d>&       uStar,
+               const Field<Eigen::Vector2d>& uOld,
+               const Field<double>&          pressure,
+               const Field<double>&          nuEffField,
+               double                        dt,
+               double                        rho,
+               ConvectionScheme              scheme,
+               double                        alphaU = 1.0);
+
 private:
     const Mesh* m_mesh;
 };

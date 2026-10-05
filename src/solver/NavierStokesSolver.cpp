@@ -31,14 +31,15 @@ BoundaryType parseBCType(const std::string& s)
     std::string upper = s;
     toUpper(upper);
 
-    if (upper == "INLET")    return BoundaryType::INLET;
-    if (upper == "OUTLET")   return BoundaryType::OUTLET;
-    if (upper == "WALL")     return BoundaryType::WALL;
-    if (upper == "SYMMETRY") return BoundaryType::SYMMETRY;
+    if (upper == "INLET")           return BoundaryType::INLET;
+    if (upper == "PARABOLIC_INLET") return BoundaryType::PARABOLIC_INLET;
+    if (upper == "OUTLET")          return BoundaryType::OUTLET;
+    if (upper == "WALL")            return BoundaryType::WALL;
+    if (upper == "SYMMETRY")        return BoundaryType::SYMMETRY;
 
     throw std::invalid_argument(
         "NavierStokesSolver: unknown BC type '" + s + "'"
-        " (expected INLET, OUTLET, WALL, or SYMMETRY)");
+        " (expected INLET, PARABOLIC_INLET, OUTLET, WALL, or SYMMETRY)");
 }
 
 /// Builds and returns a BoundaryCondition populated from config bc.* keys.
@@ -168,6 +169,23 @@ NavierStokesSolver::NavierStokesSolver(const Config& config)
 
     // Parse boundary condition config; throws std::invalid_argument on unknown type.
     m_bc = buildBoundaryConditions(config);
+
+    // ── SA turbulence model config ────────────────────────────────────────────
+    {
+        std::string turb = config.get<std::string>("solver.turbulence",
+                                                    std::string("LAMINAR"));
+        toUpper(turb);
+        m_useSA = (turb == "SA" || turb == "SPALART-ALLMARAS");
+    }
+    if (m_useSA)
+    {
+        m_alphaNu           = config.get<double>("solver.sa.alpha_nu", 0.7);
+        m_nuTildeFreestream = config.get<double>("solver.sa.nu_tilde_freestream",
+                                                  3.0 * m_nu);
+        if (m_alphaNu <= 0.0 || m_alphaNu > 1.0)
+            throw std::invalid_argument(
+                "NavierStokesSolver: solver.sa.alpha_nu must be in (0,1]");
+    }
 }
 
 void NavierStokesSolver::initialize()
@@ -205,6 +223,22 @@ void NavierStokesSolver::initialize()
     m_velResidual     = 1.0;
     m_contResidual    = 1.0;
     m_pressureResidual = 0.0;
+
+    // ── SA model initialization ───────────────────────────────────────────────
+    if (m_useSA)
+    {
+        // BFS wall distance from WALL-type boundary cells.
+        m_wallDist.emplace(WallDistance::compute(m_mesh, m_bc));
+        // ν̃ initialized to freestream value everywhere.
+        m_nuTilde.emplace(m_mesh, m_nuTildeFreestream);
+        // ν_t starts at zero (ν̃ is small relative to ν at initialization).
+        m_nuT.emplace(m_mesh, 0.0);
+        // Construct SA model bound to the loaded mesh.
+        m_saModel.emplace(m_mesh);
+        // Enforce no-slip ν̃ = 0 at wall cells (Spalart & Allmaras 1994).
+        for (int c : m_bc.collectCellsOfType(BoundaryType::WALL, m_mesh))
+            (*m_nuTilde)[c] = 0.0;
+    }
 
     Logger::get().info(
         "NavierStokesSolver::initialize() - mesh "
@@ -260,15 +294,27 @@ void NavierStokesSolver::step(double dt)
 
     // ── 1. Momentum predictor (semi-implicit) ─────────────────────────────────
     // Solves the under-relaxed implicit viscous system for u*:
-    //   (a_P/α_u) u*_P − ν a_f u*_nb = b_P + (1−α_u)/α_u · a_P · u^k_P
+    //   (a_P/α_u) u*_P − ν_eff a_f u*_nb = b_P + (1−α_u)/α_u · a_P · u^k_P
     //
     // Under-relaxation is embedded in the matrix (Patankar 1980, eq. 6.36) so
     // the pressure-corrected u* remains mass-conserving and can be committed
     // directly without a post-solve mixing step (see step 3 below).
     // Reference: Ferziger & Perić (2020) eq. 7.17 (semi-implicit SIMPLE predictor).
     Field<Eigen::Vector2d> uStar(m_mesh, Eigen::Vector2d::Zero());
-    m_momentumSolver->solve(
-        uStar, uOld, m_pressure.value(), m_dtEff, m_rho, m_nu, m_convScheme, m_alphaU);
+    if (m_useSA)
+    {
+        // Build ν_eff = ν + ν_t field for spatially varying diffusion.
+        Field<double> nuEff(m_mesh, m_nu);
+        for (int c = 0; c < Nc; ++c)
+            nuEff[c] = m_nu + (*m_nuT)[c];
+        m_momentumSolver->solve(uStar, uOld, m_pressure.value(), nuEff,
+                                m_dtEff, m_rho, m_convScheme, m_alphaU);
+    }
+    else
+    {
+        m_momentumSolver->solve(
+            uStar, uOld, m_pressure.value(), m_dtEff, m_rho, m_nu, m_convScheme, m_alphaU);
+    }
 
     // ── 1b. Apply BCs to u* before pressure correction ───────────────────────
     // The pressure Poisson equation must see the correct prescribed boundary
@@ -279,13 +325,13 @@ void NavierStokesSolver::step(double dt)
     m_bc.applyVelocity(uStar, m_mesh);
 
 
-    // ── Continuity residual (Rhie-Chow divergence of u*, before pressure correction) ─
-    // div_RC(u*) → 0 for all-wall (cavity) flows, where no structural boundary
-    // offset exists.  For open-boundary (INLET/OUTLET) flows the zero-gradient
-    // pressure closure at boundary faces produces a permanent RC correction
-    // proportional to dp/dx that never reaches zero even for the exact solution;
-    // in those cases the continuity residual is informational only — convergence
-    // is declared on the velocity residual alone (see run() convergence check).
+    // ── Continuity residual (div_RC of u*, before pressure correction) ───────
+    // Measures the mass imbalance in the momentum-predicted velocity — the
+    // same quantity the pressure correction step will drive toward zero.
+    // At convergence u* ≈ u^{k-1} and this residual → 0 for both cavity and
+    // channel flows.  After correction the committed velocity has a different
+    // (non-zero) div_RC because of pressure under-relaxation and the outlet
+    // pressure BC, so measuring on uNew would give a misleading persistent offset.
     // Reference: Rhie & Chow (1983); Ferziger & Perić (2020) §7.4.
     m_contResidual = Discretization::divergenceRhieChow(
         uStar, m_pressure.value(), m_mesh, m_dtEff, m_rho).norm();
@@ -317,7 +363,7 @@ void NavierStokesSolver::step(double dt)
     // Measured from the committed (post-BC) velocity so it captures the full
     // change including Dirichlet enforcement at the boundaries.
     const Field<Eigen::Vector2d> diff = uNew + uOld * (-1.0);
-    m_velResidual  = diff.norm() / std::max(uOld.norm(), 1e-12);
+    m_velResidual = diff.norm() / std::max(uOld.norm(), 1e-12);
 
     // Detect non-finite residuals immediately; never let them propagate silently.
     if (std::isnan(m_velResidual) || std::isinf(m_velResidual))
@@ -332,6 +378,19 @@ void NavierStokesSolver::step(double dt)
 
     // Commit the updated velocity field.
     m_velocity.value() = uNew;
+
+    // ── SA transport equation (loosely coupled — lags one SIMPLE step) ────────
+    // Solved after velocity is committed so the transport equation sees u^{k+1}.
+    if (m_useSA)
+    {
+        m_saModel->solve(*m_nuTilde, m_velocity.value(), *m_wallDist,
+                         m_nu, m_dtEff, m_alphaNu);
+        // Re-enforce ν̃ = 0 at wall cells after transport solve.
+        for (int c : m_bc.collectCellsOfType(BoundaryType::WALL, m_mesh))
+            (*m_nuTilde)[c] = 0.0;
+        // Update ν_t from new ν̃ for use in next SIMPLE step.
+        *m_nuT = SpallartAllmaras::computeNuT(*m_nuTilde, m_nu, m_mesh);
+    }
 }
 
 void NavierStokesSolver::run(int maxIter)
@@ -395,12 +454,12 @@ void NavierStokesSolver::run(int maxIter)
         }
 
         // Convergence: velocity residual drives the check.  The continuity
-        // residual (div_RC) is logged for diagnostics but is NOT required to
-        // reach tolerance: for open-boundary flows (INLET/OUTLET) the Rhie-Chow
-        // correction at boundary faces has a structural non-zero value
-        // proportional to dp/dx that persists even at the exact solution.
-        // Requiring div_RC < tol would prevent convergence for channel/pipe
-        // flows despite the velocity field being fully converged.
+        // residual (div_RC of u*) is logged for diagnostics.  For open-boundary
+        // flows (INLET/OUTLET) the RC correction at cells adjacent to prescribed
+        // velocity BCs creates a structural non-zero offset (~0.15 for this grid)
+        // that cannot be driven to zero by more iterations — it is a property of
+        // the collocated SIMPLE+RC discretisation, not an indication of non-convergence.
+        // The velocity residual is the physically correct convergence criterion.
         if (m_velResidual < m_tolerance)
         {
             Logger::get().info(

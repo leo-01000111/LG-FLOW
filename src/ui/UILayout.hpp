@@ -27,8 +27,13 @@ namespace UILayout {
     constexpr float StatusY       =  Pad;
     constexpr float StatusW       = WindowW - StatusX - Pad;
 
+    constexpr float FieldX        = StatusX;
+    constexpr float FieldY        = StatusY + StatusH + Gap;
+    constexpr float FieldW        = StatusW;
+    constexpr float FieldH        = 400.f;
+
     constexpr float PlotX         = StatusX;
-    constexpr float PlotY         = StatusY + StatusH + Gap;
+    constexpr float PlotY         = FieldY + FieldH + Gap;
     constexpr float PlotW         = StatusW;
     constexpr float PlotH         = WindowH - PlotY - Pad;
 
