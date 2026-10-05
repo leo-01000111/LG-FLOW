@@ -1,9 +1,12 @@
 #pragma once
 
+#include "core/BoundaryCondition.hpp"
 #include "core/Field.hpp"
 #include "core/Mesh.hpp"
 
 #include <Eigen/Dense>
+#include <optional>
+#include <vector>
 
 /**
  * @brief Convection discretization options.
@@ -27,8 +30,11 @@ enum class ConvectionScheme { CENTRAL, UPWIND };
  *
  * - Viscous diffusion: implicit (central, 2nd order) — removes explicit CFL constraint.
  * - Convection: explicit (upwind or central, selected per call).
- * - Boundary faces: zero-normal-gradient closure (no off-diagonal coupling to ghost cells).
- *   Dirichlet BCs are enforced by NavierStokesSolver after the solve.
+ * - Boundary faces: once setBoundaryFaces() has been called, Dirichlet faces
+ *   (walls, inlets) contribute the wall-normal viscous flux ν·A·(u_b − u_P)/d_b
+ *   with d_b the half-cell distance to the face, upwind convection uses the face
+ *   value as donor, and the pressure gradient uses the face pressure closure.
+ *   Without boundary faces, all boundaries are zero-gradient (legacy behaviour).
  * - Linear solver: SparseLU (direct, exact for the 5-point structured stencil).
  *
  * Reference: Ferziger, Perić & Street, 4th ed. (2020), Section 7.4 (eq. 7.17).
@@ -41,6 +47,20 @@ public:
      * @param mesh Mesh (must outlive this object).
      */
     explicit MomentumSolver(const Mesh& mesh);
+
+    /**
+     * @brief Supplies the boundary closure used by every subsequent solve().
+     *
+     * Call once after construction (NavierStokesSolver::initialize()). The lists
+     * must come from BoundaryCondition::buildVelocityFaces() / buildPressureFaces()
+     * for the same mesh.
+     *
+     * @param velocityFaces Velocity closure for every boundary face.
+     * @param pressureFaces Pressure closure, same face order as velocityFaces.
+     * @throws std::invalid_argument if the lists differ in size.
+     */
+    void setBoundaryFaces(std::vector<VelocityBoundaryFace> velocityFaces,
+                          std::vector<PressureBoundaryFace> pressureFaces);
 
     /**
      * @brief Solves the momentum predictor; writes result to uStar.
@@ -100,5 +120,30 @@ public:
                double                        alphaU = 1.0);
 
 private:
+    /**
+     * @brief Explicit momentum source −(u·∇)u − (1/ρ)∇p per cell, shared by both solve() overloads.
+     * @param uOld   Velocity u^k [m/s].
+     * @param pressure Pressure p^k [Pa].
+     * @param rho    Density [kg/m³].
+     * @param scheme Convection scheme.
+     * @param bSrcX  Output: x-component source [m/s²].
+     * @param bSrcY  Output: y-component source [m/s²].
+     */
+    void computeExplicitSource(const Field<Eigen::Vector2d>& uOld,
+                               const Field<double>&          pressure,
+                               double                        rho,
+                               ConvectionScheme              scheme,
+                               Field<double>&                bSrcX,
+                               Field<double>&                bSrcY) const;
+
     const Mesh* m_mesh;
+
+    std::vector<VelocityBoundaryFace> m_velocityFaces;  ///< Empty → legacy zero-gradient
+    std::vector<PressureBoundaryFace> m_pressureFaces;  ///< Same order as m_velocityFaces
+
+    /// Dirichlet face velocity on each side, for upwind donor values at the
+    /// boundary; std::nullopt where the face is zero-gradient.
+    /// West/east indexed by j (size Ny), south/north by i (size Nx).
+    std::vector<std::optional<Eigen::Vector2d>> m_westValue, m_eastValue;
+    std::vector<std::optional<Eigen::Vector2d>> m_southValue, m_northValue;
 };

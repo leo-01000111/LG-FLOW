@@ -6,13 +6,188 @@
 #include <Eigen/SparseLU>
 
 #include <cmath>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 MomentumSolver::MomentumSolver(const Mesh& mesh)
     : m_mesh(&mesh)
 {
+}
+
+void MomentumSolver::setBoundaryFaces(std::vector<VelocityBoundaryFace> velocityFaces,
+                                      std::vector<PressureBoundaryFace> pressureFaces)
+{
+    if (velocityFaces.size() != pressureFaces.size())
+        throw std::invalid_argument(
+            "MomentumSolver::setBoundaryFaces: velocity and pressure face lists differ in size");
+
+    m_velocityFaces = std::move(velocityFaces);
+    m_pressureFaces = std::move(pressureFaces);
+
+    const int Nx = m_mesh->Nx();
+    const int Ny = m_mesh->Ny();
+    m_westValue.assign(static_cast<std::size_t>(Ny), std::nullopt);
+    m_eastValue.assign(static_cast<std::size_t>(Ny), std::nullopt);
+    m_southValue.assign(static_cast<std::size_t>(Nx), std::nullopt);
+    m_northValue.assign(static_cast<std::size_t>(Nx), std::nullopt);
+
+    for (const VelocityBoundaryFace& bf : m_velocityFaces)
+    {
+        if (bf.kind != VelocityBCKind::DIRICHLET)
+            continue;
+        const auto i = static_cast<std::size_t>(bf.owner / Ny);
+        const auto j = static_cast<std::size_t>(bf.owner % Ny);
+        if      (bf.normal.x() < -0.5) m_westValue[j]  = bf.value;
+        else if (bf.normal.x() >  0.5) m_eastValue[j]  = bf.value;
+        else if (bf.normal.y() < -0.5) m_southValue[i] = bf.value;
+        else                           m_northValue[i] = bf.value;
+    }
+}
+
+void MomentumSolver::computeExplicitSource(const Field<Eigen::Vector2d>& uOld,
+                                           const Field<double>&          pressure,
+                                           double                        rho,
+                                           ConvectionScheme              scheme,
+                                           Field<double>&                bSrcX,
+                                           Field<double>&                bSrcY) const
+{
+    const int  N             = m_mesh->numCells();
+    const int  Nx            = m_mesh->Nx();
+    const int  Ny            = m_mesh->Ny();
+    const bool hasBoundaries = !m_velocityFaces.empty();
+
+    // ── Decompose u^k into scalar components ─────────────────────────────────
+    Field<double> ux(*m_mesh, 0.0);
+    Field<double> uy(*m_mesh, 0.0);
+    for (int c = 0; c < N; ++c)
+    {
+        ux[c] = uOld[c].x();
+        uy[c] = uOld[c].y();
+    }
+
+    // ── Pressure gradient (explicit, from p^k) ────────────────────────────────
+    // Central differencing via Gauss theorem; outlet faces use the fixed face
+    // pressure when boundary faces are set.
+    // Reference: Ferziger & Perić (2020) eq. 5.4.
+    const Field<Eigen::Vector2d> gradP =
+        hasBoundaries ? Discretization::gradient(pressure, *m_mesh, m_pressureFaces)
+                      : Discretization::gradient(pressure, *m_mesh);
+
+    // ── Explicit convective source: bSrc = -(u·∇)u - (1/ρ)∇p ────────────────
+    // These terms remain explicit; only the viscous term is treated implicitly.
+    if (scheme == ConvectionScheme::CENTRAL)
+    {
+        // Gauss face-average gradient, 2nd order central differencing, with
+        // Dirichlet face velocities at walls and inlets.
+        // Reference: Ferziger & Perić (2020) eq. 4.22.
+        const Field<Eigen::Vector2d> gradUx =
+            hasBoundaries ? Discretization::gradient(ux, *m_mesh, m_velocityFaces, 0)
+                          : Discretization::gradient(ux, *m_mesh);
+        const Field<Eigen::Vector2d> gradUy =
+            hasBoundaries ? Discretization::gradient(uy, *m_mesh, m_velocityFaces, 1)
+                          : Discretization::gradient(uy, *m_mesh);
+        for (int c = 0; c < N; ++c)
+        {
+            bSrcX[c] = -uOld[c].dot(gradUx[c]) - (1.0 / rho) * gradP[c].x();
+            bSrcY[c] = -uOld[c].dot(gradUy[c]) - (1.0 / rho) * gradP[c].y();
+        }
+        return;
+    }
+
+    // First-order upwind (donor-cell) differencing.
+    // For φ and direction x: if u_x ≥ 0, backward diff; if u_x < 0, forward diff.
+    // At a Dirichlet boundary face the donor is the face value at half-cell
+    // distance; at a zero-gradient face the derivative is zero.
+    // Reference: Ferziger & Perić (2020) eq. 4.24 (donor-cell).
+    //
+    // dx = spacing between cell centres in x; derived from uniform grid layout.
+    // For a uniform grid spanning [0, Lx] with Nx cells: centre(0,j).x = dx/2.
+    const double dx = 2.0 * m_mesh->getCellCenter(0, 0).x();
+    const double dy = 2.0 * m_mesh->getCellCenter(0, 0).y();
+
+    // One-sided derivative (φ_downstream − φ_upstream)/h with the boundary face
+    // as upstream (or downstream) point when it is Dirichlet.
+    const auto fromFace = [](const std::optional<Eigen::Vector2d>& face,
+                             double phiP, int axis, double halfH, bool faceIsUpstream) {
+        if (!face)
+            return 0.0;
+        const double phiB = (*face)[axis];
+        return faceIsUpstream ? (phiP - phiB) / halfH : (phiB - phiP) / halfH;
+    };
+
+    for (int c = 0; c < N; ++c)
+    {
+        const int    i    = c / Ny;
+        const int    j    = c % Ny;
+        const auto   si   = static_cast<std::size_t>(i);
+        const auto   sj   = static_cast<std::size_t>(j);
+        const double ux_c = uOld[c].x();
+        const double uy_c = uOld[c].y();
+
+        double dux_dx = 0.0, dux_dy = 0.0, duy_dx = 0.0, duy_dy = 0.0;
+
+        // x-direction upwind
+        if (ux_c >= 0.0)
+        {
+            if (i > 0)
+            {
+                dux_dx = (ux[c] - ux[(i - 1) * Ny + j]) / dx;
+                duy_dx = (uy[c] - uy[(i - 1) * Ny + j]) / dx;
+            }
+            else if (hasBoundaries)
+            {
+                dux_dx = fromFace(m_westValue[sj], ux[c], 0, 0.5 * dx, true);
+                duy_dx = fromFace(m_westValue[sj], uy[c], 1, 0.5 * dx, true);
+            }
+        }
+        else
+        {
+            if (i < Nx - 1)
+            {
+                dux_dx = (ux[(i + 1) * Ny + j] - ux[c]) / dx;
+                duy_dx = (uy[(i + 1) * Ny + j] - uy[c]) / dx;
+            }
+            else if (hasBoundaries)
+            {
+                dux_dx = fromFace(m_eastValue[sj], ux[c], 0, 0.5 * dx, false);
+                duy_dx = fromFace(m_eastValue[sj], uy[c], 1, 0.5 * dx, false);
+            }
+        }
+
+        // y-direction upwind
+        if (uy_c >= 0.0)
+        {
+            if (j > 0)
+            {
+                dux_dy = (ux[c] - ux[i * Ny + (j - 1)]) / dy;
+                duy_dy = (uy[c] - uy[i * Ny + (j - 1)]) / dy;
+            }
+            else if (hasBoundaries)
+            {
+                dux_dy = fromFace(m_southValue[si], ux[c], 0, 0.5 * dy, true);
+                duy_dy = fromFace(m_southValue[si], uy[c], 1, 0.5 * dy, true);
+            }
+        }
+        else
+        {
+            if (j < Ny - 1)
+            {
+                dux_dy = (ux[i * Ny + (j + 1)] - ux[c]) / dy;
+                duy_dy = (uy[i * Ny + (j + 1)] - uy[c]) / dy;
+            }
+            else if (hasBoundaries)
+            {
+                dux_dy = fromFace(m_northValue[si], ux[c], 0, 0.5 * dy, false);
+                duy_dy = fromFace(m_northValue[si], uy[c], 1, 0.5 * dy, false);
+            }
+        }
+
+        bSrcX[c] = -(ux_c * dux_dx + uy_c * dux_dy) - (1.0 / rho) * gradP[c].x();
+        bSrcY[c] = -(ux_c * duy_dx + uy_c * duy_dy) - (1.0 / rho) * gradP[c].y();
+    }
 }
 
 void MomentumSolver::solve(Field<Eigen::Vector2d>&       uStar,
@@ -36,95 +211,19 @@ void MomentumSolver::solve(Field<Eigen::Vector2d>&       uStar,
         throw std::invalid_argument("MomentumSolver::solve: field mesh mismatch");
 
     const int N  = m_mesh->numCells();
-    const int Nx = m_mesh->Nx();
     const int Ny = m_mesh->Ny();
 
-    // ── Decompose u^k into scalar components ─────────────────────────────────
-    Field<double> ux(*m_mesh, 0.0);
-    Field<double> uy(*m_mesh, 0.0);
-    for (int c = 0; c < N; ++c)
-    {
-        ux[c] = uOld[c].x();
-        uy[c] = uOld[c].y();
-    }
-
-    // ── Pressure gradient (explicit, from p^k) ────────────────────────────────
-    // Central differencing via Gauss theorem.
-    // Reference: Ferziger & Perić (2020) eq. 5.4.
-    const Field<Eigen::Vector2d> gradP = Discretization::gradient(pressure, *m_mesh);
-
-    // ── Explicit convective source: bSrc = -(u·∇)u - (1/ρ)∇p ────────────────
-    // These terms remain explicit; only the viscous term is treated implicitly.
+    // ── Explicit source: −(u·∇)u − (1/ρ)∇p ───────────────────────────────────
     Field<double> bSrcX(*m_mesh, 0.0);
     Field<double> bSrcY(*m_mesh, 0.0);
-
-    if (scheme == ConvectionScheme::CENTRAL)
-    {
-        // Gauss face-average gradient, 2nd order central differencing.
-        // Reference: Ferziger & Perić (2020) eq. 4.22.
-        const Field<Eigen::Vector2d> gradUx = Discretization::gradient(ux, *m_mesh);
-        const Field<Eigen::Vector2d> gradUy = Discretization::gradient(uy, *m_mesh);
-        for (int c = 0; c < N; ++c)
-        {
-            bSrcX[c] = -uOld[c].dot(gradUx[c]) - (1.0 / rho) * gradP[c].x();
-            bSrcY[c] = -uOld[c].dot(gradUy[c]) - (1.0 / rho) * gradP[c].y();
-        }
-    }
-    else
-    {
-        // First-order upwind (donor-cell) differencing.
-        // For φ and direction x: if u_x ≥ 0, backward diff; if u_x < 0, forward diff.
-        // Zero-gradient closure at domain boundary (no neighbour available).
-        // Reference: Ferziger & Perić (2020) eq. 4.24 (donor-cell).
-        //
-        // dx = spacing between cell centres in x; derived from uniform grid layout.
-        // For a uniform grid spanning [0, Lx] with Nx cells: centre(0,j).x = dx/2.
-        const double dx = 2.0 * m_mesh->getCellCenter(0, 0).x();
-        const double dy = 2.0 * m_mesh->getCellCenter(0, 0).y();
-
-        for (int c = 0; c < N; ++c)
-        {
-            const int    i    = c / Ny;
-            const int    j    = c % Ny;
-            const double ux_c = uOld[c].x();
-            const double uy_c = uOld[c].y();
-
-            double dux_dx, dux_dy, duy_dx, duy_dy;
-
-            // x-direction upwind
-            if (ux_c >= 0.0)
-            {
-                dux_dx = (i > 0)      ? (ux[c] - ux[(i - 1) * Ny + j]) / dx : 0.0;
-                duy_dx = (i > 0)      ? (uy[c] - uy[(i - 1) * Ny + j]) / dx : 0.0;
-            }
-            else
-            {
-                dux_dx = (i < Nx - 1) ? (ux[(i + 1) * Ny + j] - ux[c]) / dx : 0.0;
-                duy_dx = (i < Nx - 1) ? (uy[(i + 1) * Ny + j] - uy[c]) / dx : 0.0;
-            }
-
-            // y-direction upwind
-            if (uy_c >= 0.0)
-            {
-                dux_dy = (j > 0)      ? (ux[c] - ux[i * Ny + (j - 1)]) / dy : 0.0;
-                duy_dy = (j > 0)      ? (uy[c] - uy[i * Ny + (j - 1)]) / dy : 0.0;
-            }
-            else
-            {
-                dux_dy = (j < Ny - 1) ? (ux[i * Ny + (j + 1)] - ux[c]) / dy : 0.0;
-                duy_dy = (j < Ny - 1) ? (uy[i * Ny + (j + 1)] - uy[c]) / dy : 0.0;
-            }
-
-            bSrcX[c] = -(ux_c * dux_dx + uy_c * dux_dy) - (1.0 / rho) * gradP[c].x();
-            bSrcY[c] = -(ux_c * duy_dx + uy_c * duy_dy) - (1.0 / rho) * gradP[c].y();
-        }
-    }
+    computeExplicitSource(uOld, pressure, rho, scheme, bSrcX, bSrcY);
 
     // ── Build implicit viscous matrix ─────────────────────────────────────────
     // For component φ ∈ {ux, uy}:
     //   (V_P/dt + ν Σ_f a_f) φ*_P − ν a_f φ*_nb = (V_P/dt) φ^k_P + V_P bSrc_P
     //
-    // a_f = A_face / |x_N − x_P|  for interior faces; boundary faces skipped (zero-gradient).
+    // a_f = A_face / |x_N − x_P|  for interior faces; Dirichlet boundary faces are
+    // added below, zero-gradient boundary faces carry no viscous flux.
     // The matrix is symmetric and diagonally dominant → SPD.
     // Reference: Ferziger & Perić (2020) eq. 7.17.
     using Triplet = Eigen::Triplet<double>;
@@ -167,6 +266,21 @@ void MomentumSolver::solve(Field<Eigen::Vector2d>&       uStar,
 
         triplets.emplace_back(o, n, -aF);
         triplets.emplace_back(n, o, -aF);
+    }
+
+    // Dirichlet boundary faces (walls, inlets): viscous flux between the cell
+    // centre and the face at half-cell distance d_b,
+    //   ν·A·(u_b − u_P)/d_b  →  a_P += ν·A/d_b,  b += ν·A/d_b · u_b.
+    // Zero-gradient faces carry no viscous flux.
+    // Reference: Ferziger, Perić & Street (2020) Ch. 8 (wall boundary conditions).
+    for (const VelocityBoundaryFace& bf : m_velocityFaces)
+    {
+        if (bf.kind != VelocityBCKind::DIRICHLET)
+            continue;
+        const double aB = nu * bf.area / bf.distance;
+        diag[static_cast<std::size_t>(bf.owner)] += aB;
+        bX[bf.owner] += aB * bf.value.x();
+        bY[bf.owner] += aB * bf.value.y();
     }
 
     // Apply under-relaxation (Patankar 1980, eq. 6.36).
@@ -254,75 +368,12 @@ void MomentumSolver::solve(Field<Eigen::Vector2d>&       uStar,
         throw std::invalid_argument("MomentumSolver::solve: field mesh mismatch");
 
     const int N  = m_mesh->numCells();
-    const int Nx = m_mesh->Nx();
     const int Ny = m_mesh->Ny();
 
-    // ── Decompose u^k into scalar components ─────────────────────────────────
-    Field<double> ux(*m_mesh, 0.0);
-    Field<double> uy(*m_mesh, 0.0);
-    for (int c = 0; c < N; ++c)
-    {
-        ux[c] = uOld[c].x();
-        uy[c] = uOld[c].y();
-    }
-
-    // ── Pressure gradient (explicit, from p^k) ────────────────────────────────
-    const Field<Eigen::Vector2d> gradP = Discretization::gradient(pressure, *m_mesh);
-
-    // ── Explicit convective source ────────────────────────────────────────────
+    // ── Explicit source: −(u·∇)u − (1/ρ)∇p ───────────────────────────────────
     Field<double> bSrcX(*m_mesh, 0.0);
     Field<double> bSrcY(*m_mesh, 0.0);
-
-    if (scheme == ConvectionScheme::CENTRAL)
-    {
-        const Field<Eigen::Vector2d> gradUx = Discretization::gradient(ux, *m_mesh);
-        const Field<Eigen::Vector2d> gradUy = Discretization::gradient(uy, *m_mesh);
-        for (int c = 0; c < N; ++c)
-        {
-            bSrcX[c] = -uOld[c].dot(gradUx[c]) - (1.0 / rho) * gradP[c].x();
-            bSrcY[c] = -uOld[c].dot(gradUy[c]) - (1.0 / rho) * gradP[c].y();
-        }
-    }
-    else
-    {
-        const double dx = 2.0 * m_mesh->getCellCenter(0, 0).x();
-        const double dy = 2.0 * m_mesh->getCellCenter(0, 0).y();
-
-        for (int c = 0; c < N; ++c)
-        {
-            const int    i    = c / Ny;
-            const int    j    = c % Ny;
-            const double ux_c = uOld[c].x();
-            const double uy_c = uOld[c].y();
-
-            double dux_dx, dux_dy, duy_dx, duy_dy;
-
-            if (ux_c >= 0.0)
-            {
-                dux_dx = (i > 0)      ? (ux[c] - ux[(i - 1) * Ny + j]) / dx : 0.0;
-                duy_dx = (i > 0)      ? (uy[c] - uy[(i - 1) * Ny + j]) / dx : 0.0;
-            }
-            else
-            {
-                dux_dx = (i < Nx - 1) ? (ux[(i + 1) * Ny + j] - ux[c]) / dx : 0.0;
-                duy_dx = (i < Nx - 1) ? (uy[(i + 1) * Ny + j] - uy[c]) / dx : 0.0;
-            }
-
-            if (uy_c >= 0.0)
-            {
-                dux_dy = (j > 0)      ? (ux[c] - ux[i * Ny + (j - 1)]) / dy : 0.0;
-                duy_dy = (j > 0)      ? (uy[c] - uy[i * Ny + (j - 1)]) / dy : 0.0;
-            }
-            else
-            {
-                dux_dy = (j < Ny - 1) ? (ux[i * Ny + (j + 1)] - ux[c]) / dy : 0.0;
-                duy_dy = (j < Ny - 1) ? (uy[i * Ny + (j + 1)] - uy[c]) / dy : 0.0;
-            }
-
-            bSrcX[c] = -(ux_c * dux_dx + uy_c * dux_dy) - (1.0 / rho) * gradP[c].x();
-            bSrcY[c] = -(ux_c * duy_dx + uy_c * duy_dy) - (1.0 / rho) * gradP[c].y();
-        }
-    }
+    computeExplicitSource(uOld, pressure, rho, scheme, bSrcX, bSrcY);
 
     // ── Build implicit viscous matrix (variable ν_eff) ────────────────────────
     using Triplet = Eigen::Triplet<double>;
@@ -366,6 +417,18 @@ void MomentumSolver::solve(Field<Eigen::Vector2d>&       uStar,
 
         triplets.emplace_back(o, n, -aF);
         triplets.emplace_back(n, o, -aF);
+    }
+
+    // Dirichlet boundary faces: same half-cell wall flux as the scalar overload,
+    // with ν_eff taken from the owner cell (the face has no second cell).
+    for (const VelocityBoundaryFace& bf : m_velocityFaces)
+    {
+        if (bf.kind != VelocityBCKind::DIRICHLET)
+            continue;
+        const double aB = nuEffField[bf.owner] * bf.area / bf.distance;
+        diag[static_cast<std::size_t>(bf.owner)] += aB;
+        bX[bf.owner] += aB * bf.value.x();
+        bY[bf.owner] += aB * bf.value.y();
     }
 
     if (alphaU < 1.0)
