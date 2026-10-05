@@ -1,12 +1,16 @@
+#include "core/BoundaryCondition.hpp"
 #include "core/Field.hpp"
 #include "core/Mesh.hpp"
 #include "solver/Discretization.hpp"
 #include "solver/PressureSolver.hpp"
 
 #include <Eigen/Dense>
+#include <algorithm>
 #include <cmath>
 #include <gtest/gtest.h>
 #include <stdexcept>
+#include <utility>
+#include <vector>
 
 namespace
 {
@@ -260,4 +264,98 @@ TEST(PressureSolver, Solve_StencilConsistentCorrection_FiniteOnLargerMesh)
     for (int k = 0; k < mesh.numCells(); ++k)
         EXPECT_TRUE(vel[k].allFinite())
             << "Velocity became non-finite at cell " << k;
+}
+
+// ── Boundary faces (setBoundaryFaces) ─────────────────────────────────────────
+
+namespace
+{
+/// Max |∇·u|_RC over all cells using the boundary-aware Rhie-Chow divergence.
+double maxRhieChowDivergence(const Field<Eigen::Vector2d>&      vel,
+                             const Field<double>&               p,
+                             const Mesh&                        mesh,
+                             const std::vector<VelocityBoundaryFace>& vf,
+                             const std::vector<PressureBoundaryFace>& pf)
+{
+    const Field<double> div =
+        Discretization::divergenceRhieChow(vel, p, mesh, 0.01, 1.0, vf, pf);
+    double maxAbs = 0.0;
+    for (int c = 0; c < mesh.numCells(); ++c)
+        maxAbs = std::max(maxAbs, std::abs(div[c]));
+    return maxAbs;
+}
+}  // namespace
+
+TEST(PressureSolver, SetBoundaryFaces_ChannelInletIntoStillFluid_DivergenceFreeEverywhere)
+{
+    // One correction with αp = 1 must make every cell's Rhie-Chow divergence
+    // vanish, including the inlet column (exact inflow) and the outlet column
+    // (p' = 0 on the outlet face). The legacy pinned-outlet-cell closure
+    // leaves the outlet cells unbalanced.
+    Mesh mesh;
+    mesh.load(8, 4, 2.0, 1.0);
+    BoundaryCondition bc;
+    bc.addPatch("left",   {BoundaryType::INLET,  Eigen::Vector2d(1.0, 0.0)});
+    bc.addPatch("right",  {BoundaryType::OUTLET, Eigen::Vector2d::Zero()});
+    bc.addPatch("bottom", {BoundaryType::WALL,   Eigen::Vector2d::Zero()});
+    bc.addPatch("top",    {BoundaryType::WALL,   Eigen::Vector2d::Zero()});
+    const std::vector<VelocityBoundaryFace> vf = bc.buildVelocityFaces(mesh);
+    const std::vector<PressureBoundaryFace> pf = bc.buildPressureFaces(mesh);
+
+    PressureSolver solver(mesh);
+    solver.setBoundaryFaces(pf, vf);
+
+    Field<Eigen::Vector2d> vel(mesh, Eigen::Vector2d::Zero());
+    Field<double>          p(mesh, 0.0);
+    ASSERT_GT(maxRhieChowDivergence(vel, p, mesh, vf, pf), 1.0);
+
+    static_cast<void>(solver.solve(vel, p, 0.01, 1.0, 1.0));
+
+    EXPECT_LT(maxRhieChowDivergence(vel, p, mesh, vf, pf), 1e-9);
+}
+
+TEST(PressureSolver, SetBoundaryFaces_ClosedCavity_DivergenceFreeWithPinnedCell)
+{
+    // No fixed-pressure face → cell 0 is pinned. Exact zero wall fluxes make
+    // the Neumann problem compatible, so the pin does not leave a residual.
+    Mesh mesh;
+    mesh.load(6, 6, 1.0, 1.0);
+    BoundaryCondition bc;
+    bc.addPatch("top",    {BoundaryType::WALL, Eigen::Vector2d(1.0, 0.0)});
+    bc.addPatch("bottom", {BoundaryType::WALL, Eigen::Vector2d::Zero()});
+    bc.addPatch("left",   {BoundaryType::WALL, Eigen::Vector2d::Zero()});
+    bc.addPatch("right",  {BoundaryType::WALL, Eigen::Vector2d::Zero()});
+    const std::vector<VelocityBoundaryFace> vf = bc.buildVelocityFaces(mesh);
+    const std::vector<PressureBoundaryFace> pf = bc.buildPressureFaces(mesh);
+
+    PressureSolver solver(mesh);
+    solver.setBoundaryFaces(pf, vf);
+
+    // Compressive predicted field u* = (x(1−x), 0): non-zero divergence inside.
+    Field<Eigen::Vector2d> vel(mesh, Eigen::Vector2d::Zero());
+    for (int i = 0; i < mesh.Nx(); ++i)
+        for (int j = 0; j < mesh.Ny(); ++j)
+        {
+            const double x = mesh.getCellCenter(i, j).x();
+            vel(i, j) = Eigen::Vector2d(x * (1.0 - x), 0.0);
+        }
+    Field<double> p(mesh, 0.0);
+    ASSERT_GT(maxRhieChowDivergence(vel, p, mesh, vf, pf), 0.1);
+
+    static_cast<void>(solver.solve(vel, p, 0.01, 1.0, 1.0));
+
+    EXPECT_LT(maxRhieChowDivergence(vel, p, mesh, vf, pf), 1e-9);
+}
+
+TEST(PressureSolver, SetBoundaryFaces_MismatchedLists_Throws)
+{
+    Mesh mesh;
+    mesh.load(4, 4, 1.0, 1.0);
+    const BoundaryCondition bc;
+    std::vector<VelocityBoundaryFace> vf = bc.buildVelocityFaces(mesh);
+    vf.pop_back();
+
+    PressureSolver solver(mesh);
+    EXPECT_THROW(solver.setBoundaryFaces(bc.buildPressureFaces(mesh), std::move(vf)),
+                 std::invalid_argument);
 }

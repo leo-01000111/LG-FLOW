@@ -6,6 +6,7 @@
 
 #include <cmath>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 PressureSolver::PressureSolver(const Mesh& mesh)
@@ -16,6 +17,30 @@ PressureSolver::PressureSolver(const Mesh& mesh)
 void PressureSolver::setDirichletPressureCells(std::vector<int> cells)
 {
     m_dirichletCells = std::move(cells);
+}
+
+void PressureSolver::setBoundaryFaces(std::vector<PressureBoundaryFace> pressureFaces,
+                                      std::vector<VelocityBoundaryFace> velocityFaces)
+{
+    if (pressureFaces.size() != velocityFaces.size())
+        throw std::invalid_argument(
+            "PressureSolver::setBoundaryFaces: pressure and velocity face lists differ in size");
+
+    m_pressureFaces = std::move(pressureFaces);
+    m_velocityFaces = std::move(velocityFaces);
+
+    // The correction p' vanishes on fixed-pressure faces regardless of the
+    // prescribed p there, so the correction gradient uses p'_b = 0.
+    m_correctionFaces = m_pressureFaces;
+    m_hasFixedFace    = false;
+    for (PressureBoundaryFace& bf : m_correctionFaces)
+    {
+        if (bf.kind == PressureBCKind::FIXED)
+        {
+            bf.value       = 0.0;
+            m_hasFixedFace = true;
+        }
+    }
 }
 
 double PressureSolver::solve(Field<Eigen::Vector2d>& velocityField,
@@ -47,8 +72,11 @@ double PressureSolver::solve(Field<Eigen::Vector2d>& velocityField,
     // pressure oscillations on the collocated grid.  The RC correction adds
     // sensitivity to the compact face pressure gradient, damping decoupled modes.
     // Reference: Patankar (1980) eq. 6.28; Rhie & Chow (1983) AIAA J. 21:1525.
-    Field<double> divU =
-        Discretization::divergenceRhieChow(velocityField, pressureField, *m_mesh, dt, rho);
+    const bool hasBoundaryFaces = !m_pressureFaces.empty();
+    Field<double> divU = hasBoundaryFaces
+        ? Discretization::divergenceRhieChow(velocityField, pressureField, *m_mesh, dt, rho,
+                                             m_velocityFaces, m_pressureFaces)
+        : Discretization::divergenceRhieChow(velocityField, pressureField, *m_mesh, dt, rho);
 
     Eigen::VectorXd b(N);
     for (int cellId = 0; cellId < N; ++cellId)
@@ -76,7 +104,13 @@ double PressureSolver::solve(Field<Eigen::Vector2d>& velocityField,
 
     // Build reference-cell lookup: isRef[c] = true → row c uses identity equation.
     std::vector<bool> isRef(static_cast<std::size_t>(N), false);
-    if (m_dirichletCells.empty())
+    if (hasBoundaryFaces)
+    {
+        // Fixed-pressure faces anchor p'; only a closed domain needs a pin.
+        if (!m_hasFixedFace)
+            isRef[0] = true;
+    }
+    else if (m_dirichletCells.empty())
     {
         isRef[0] = true;  // fallback: pin cell 0 (all-wall / no-outlet case)
     }
@@ -118,6 +152,12 @@ double PressureSolver::solve(Field<Eigen::Vector2d>& velocityField,
         if (!isRef[static_cast<std::size_t>(n)])
             triplets.emplace_back(n, o, -aF);
     }
+
+    // Fixed-pressure boundary faces: p'_b = 0 at half-cell distance d_b,
+    // so a_b = A_f / d_b goes on the owner's diagonal with no RHS term.
+    for (const PressureBoundaryFace& bf : m_pressureFaces)
+        if (bf.kind == PressureBCKind::FIXED)
+            diag[static_cast<std::size_t>(bf.owner)] += bf.area / bf.distance;
 
     // --- Step 3: Fix pure-Neumann singularity ---
     // Each reference cell r gets an identity row (p'[r] = 0), which pins the
@@ -200,6 +240,18 @@ double PressureSolver::solve(Field<Eigen::Vector2d>& velocityField,
     // This is algebraically identical to Discretization::gradient but avoids the
     // general face-iteration overhead and keeps the stencil readable.
     // Reference: Patankar (1980) eq. 6.31; Ferziger & Peric (2020) eq. 4.22.
+    //
+    // With boundary faces set, the Gauss gradient uses p'_b = 0 on fixed-pressure
+    // faces so the correction is consistent with the outlet face condition.
+    if (hasBoundaryFaces)
+    {
+        const double coeff = dt / rho;
+        const Field<Eigen::Vector2d> gradPPrime =
+            Discretization::gradient(pPrime, *m_mesh, m_correctionFaces);
+        for (int cellId = 0; cellId < N; ++cellId)
+            velocityField[cellId] -= coeff * gradPPrime[cellId];
+    }
+    else
     {
         const double coeff = dt / rho;
         // Derive uniform cell spacing from the first cell centre.
