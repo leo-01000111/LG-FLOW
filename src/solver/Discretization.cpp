@@ -19,6 +19,67 @@ inline Eigen::Vector2d cellCentreById(int cellId, const Mesh& mesh)
     const int j = cellId % mesh.Ny();
     return mesh.getCellCenter(i, j);
 }
+
+/// Adds interior-face Gauss-gradient contributions (linear face interpolation).
+void addInteriorGradient(const Field<double>& field, const Mesh& mesh,
+                         Field<Eigen::Vector2d>& result)
+{
+    const int nFaces = mesh.numFaces();
+    for (int f = 0; f < nFaces; ++f)
+    {
+        const auto [owner, neighbour] = mesh.getNeighbors(f);
+        if (neighbour == -1)
+            continue;
+
+        const double          phi_f   = 0.5 * (field[owner] + field[neighbour]);
+        const Eigen::Vector2d contrib = phi_f * mesh.getFaceNormal(f) * mesh.getFaceArea(f);
+
+        result[owner]     += contrib / mesh.getCellVolume(owner);
+        result[neighbour] -= contrib / mesh.getCellVolume(neighbour);
+    }
+}
+
+/// Adds interior-face Rhie-Chow fluxes (Rhie & Chow 1983) to the divergence.
+void addInteriorRhieChowFlux(const Field<Eigen::Vector2d>& velocity,
+                             const Field<double>&          pressure,
+                             const Field<Eigen::Vector2d>& gradP,
+                             const Mesh&                   mesh,
+                             double                        dtOverRho,
+                             Field<double>&                result)
+{
+    const int nFaces = mesh.numFaces();
+    for (int f = 0; f < nFaces; ++f)
+    {
+        const auto [owner, neighbour] = mesh.getNeighbors(f);
+        if (neighbour == -1)
+            continue;
+
+        const Eigen::Vector2d n = mesh.getFaceNormal(f);  // owner → neighbour
+        const double          A = mesh.getFaceArea(f);
+
+        // Linearly interpolated normal face velocity:
+        //   ū_f · n̂ = 0.5*(u_P + u_N) · n̂
+        const double uBar_dot_n = 0.5 * (velocity[owner] + velocity[neighbour]).dot(n);
+
+        // Compact face pressure gradient in the face-normal direction:
+        //   (p_N − p_P) / |x_N − x_P|
+        const double dist =
+            (cellCentreById(neighbour, mesh) - cellCentreById(owner, mesh)).norm();
+        const double compactGrad = (pressure[neighbour] - pressure[owner]) / dist;
+
+        // Face-interpolated cell-centre gradient (projected on n̂):
+        //   0.5*(∇p_P + ∇p_N) · n̂
+        const double interpGrad = 0.5 * (gradP[owner] + gradP[neighbour]).dot(n);
+
+        // Rhie-Chow correction: subtract (dt/ρ) * (compact − interp).
+        // The compact gradient sees the checkerboard; the interpolated gradient
+        // does not.  The difference damps decoupled pressure modes.
+        const double faceFlux = (uBar_dot_n - dtOverRho * (compactGrad - interpGrad)) * A;
+
+        result[owner]     += faceFlux / mesh.getCellVolume(owner);
+        result[neighbour] -= faceFlux / mesh.getCellVolume(neighbour);
+    }
+}
 }  // namespace
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -95,6 +156,56 @@ Discretization::gradient(const Field<double>& field, const Mesh& mesh)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// gradient with boundary-face closure — Ferziger & Perić eq. 5.4
+// Central interpolation on interior faces; BC-prescribed values at boundary faces.
+// ─────────────────────────────────────────────────────────────────────────────
+Field<Eigen::Vector2d>
+Discretization::gradient(const Field<double>&                   pressure,
+                         const Mesh&                            mesh,
+                         std::span<const PressureBoundaryFace>  boundaryFaces)
+{
+    if (&pressure.mesh() != &mesh)
+        throw std::invalid_argument(
+            "Discretization::gradient: field is not on the supplied mesh");
+
+    Field<Eigen::Vector2d> result(mesh, Eigen::Vector2d::Zero());
+    addInteriorGradient(pressure, mesh, result);
+
+    for (const PressureBoundaryFace& bf : boundaryFaces)
+    {
+        const double phi_f = (bf.kind == PressureBCKind::FIXED) ? bf.value
+                                                                : pressure[bf.owner];
+        result[bf.owner] += phi_f * bf.normal * bf.area / mesh.getCellVolume(bf.owner);
+    }
+    return result;
+}
+
+Field<Eigen::Vector2d>
+Discretization::gradient(const Field<double>&                   component,
+                         const Mesh&                            mesh,
+                         std::span<const VelocityBoundaryFace>  boundaryFaces,
+                         int                                    axis)
+{
+    if (&component.mesh() != &mesh)
+        throw std::invalid_argument(
+            "Discretization::gradient: field is not on the supplied mesh");
+    if (axis != 0 && axis != 1)
+        throw std::invalid_argument(
+            "Discretization::gradient: axis must be 0 or 1 (got " + std::to_string(axis) + ")");
+
+    Field<Eigen::Vector2d> result(mesh, Eigen::Vector2d::Zero());
+    addInteriorGradient(component, mesh, result);
+
+    for (const VelocityBoundaryFace& bf : boundaryFaces)
+    {
+        const double phi_f = (bf.kind == VelocityBCKind::DIRICHLET) ? bf.value[axis]
+                                                                    : component[bf.owner];
+        result[bf.owner] += phi_f * bf.normal * bf.area / mesh.getCellVolume(bf.owner);
+    }
+    return result;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // divergenceRhieChow — Rhie-Chow (1983) face-interpolated divergence
 // Prevents checkerboard pressure oscillations on collocated grids by replacing
 // the linearly-interpolated face velocity with a compact-gradient-corrected value.
@@ -119,62 +230,78 @@ Discretization::divergenceRhieChow(const Field<Eigen::Vector2d>& velocity,
     const Field<Eigen::Vector2d> gradP = gradient(pressure, mesh);
 
     Field<double> result(mesh, 0.0);
-    const int     nFaces     = mesh.numFaces();
-    const int     Ny         = mesh.Ny();
-    const double  dtOverRho  = dt / rho;
+    addInteriorRhieChowFlux(velocity, pressure, gradP, mesh, dt / rho, result);
 
+    // Boundary faces: use owner velocity (zero-gradient; same as divergence()).
+    const int nFaces = mesh.numFaces();
     for (int f = 0; f < nFaces; ++f)
     {
         const auto [owner, neighbour] = mesh.getNeighbors(f);
-        const Eigen::Vector2d n = mesh.getFaceNormal(f);  // outward unit normal (owner → neighbour)
-        const double          A = mesh.getFaceArea(f);
+        if (neighbour != -1)
+            continue;
+        const double faceFlux =
+            velocity[owner].dot(mesh.getFaceNormal(f)) * mesh.getFaceArea(f);
+        result[owner] += faceFlux / mesh.getCellVolume(owner);
+    }
 
-        double faceFlux;
+    return result;
+}
 
-        if (neighbour == -1)
+Field<double>
+Discretization::divergenceRhieChow(const Field<Eigen::Vector2d>&          velocity,
+                                    const Field<double>&                   pressure,
+                                    const Mesh&                            mesh,
+                                    double                                 dt,
+                                    double                                 rho,
+                                    std::span<const VelocityBoundaryFace>  velocityFaces,
+                                    std::span<const PressureBoundaryFace>  pressureFaces)
+{
+    if (&velocity.mesh() != &mesh)
+        throw std::invalid_argument(
+            "Discretization::divergenceRhieChow: velocity field is not on the supplied mesh");
+    if (&pressure.mesh() != &mesh)
+        throw std::invalid_argument(
+            "Discretization::divergenceRhieChow: pressure field is not on the supplied mesh");
+    if (velocityFaces.size() != pressureFaces.size())
+        throw std::invalid_argument(
+            "Discretization::divergenceRhieChow: velocity and pressure face lists differ in size");
+
+    const Field<Eigen::Vector2d> gradP = gradient(pressure, mesh, pressureFaces);
+    const double dtOverRho = dt / rho;
+
+    Field<double> result(mesh, 0.0);
+    addInteriorRhieChowFlux(velocity, pressure, gradP, mesh, dtOverRho, result);
+
+    for (std::size_t k = 0; k < velocityFaces.size(); ++k)
+    {
+        const VelocityBoundaryFace& vf = velocityFaces[k];
+        const PressureBoundaryFace& pf = pressureFaces[k];
+        if (vf.face != pf.face)
+            throw std::invalid_argument(
+                "Discretization::divergenceRhieChow: face lists are not in the same order");
+
+        const int owner = vf.owner;
+        double faceVel;  // normal face velocity û_f · n̂
+
+        if (vf.kind == VelocityBCKind::DIRICHLET)
         {
-            // Boundary face: use owner velocity (zero-gradient; same as divergence()).
-            faceFlux = velocity[owner].dot(n) * A;
+            // Prescribed velocity: the boundary flux is known exactly.
+            faceVel = vf.value.dot(vf.normal);
+        }
+        else if (pf.kind == PressureBCKind::FIXED)
+        {
+            // Outlet: Rhie-Chow between owner and face with the fixed face
+            // pressure, consistent with the p' = 0 face condition in PressureSolver.
+            const double compactGrad = (pf.value - pressure[owner]) / pf.distance;
+            const double cellGrad    = gradP[owner].dot(vf.normal);
+            faceVel = velocity[owner].dot(vf.normal) - dtOverRho * (compactGrad - cellGrad);
         }
         else
         {
-            // Interior face: apply Rhie-Chow correction.
-            //
-            // Linearly interpolated normal face velocity:
-            //   ū_f · n̂ = 0.5*(u_P + u_N) · n̂
-            const double uBar_dot_n =
-                0.5 * (velocity[owner] + velocity[neighbour]).dot(n);
-
-            // Compact face pressure gradient in the face-normal direction:
-            //   (p_N − p_P) / |x_N − x_P|
-            // The sign is positive when pressure increases in the n̂ direction.
-            const int io  = owner    / Ny;
-            const int jo  = owner    % Ny;
-            const int in_ = neighbour / Ny;
-            const int jn  = neighbour % Ny;
-
-            const Eigen::Vector2d xo   = mesh.getCellCenter(io,  jo);
-            const Eigen::Vector2d xn   = mesh.getCellCenter(in_, jn);
-            const double          dist = (xn - xo).norm();
-
-            const double compactGrad =
-                (pressure[neighbour] - pressure[owner]) / dist;
-
-            // Face-interpolated cell-centre gradient (projected on n̂):
-            //   0.5*(∇p_P + ∇p_N) · n̂
-            const double interpGrad =
-                0.5 * (gradP[owner] + gradP[neighbour]).dot(n);
-
-            // Rhie-Chow correction: subtract (dt/ρ) * (compact − interp).
-            // The compact gradient sees the checkerboard; the interpolated gradient
-            // does not.  The difference damps decoupled pressure modes.
-            const double rcFaceVel = uBar_dot_n - dtOverRho * (compactGrad - interpGrad);
-            faceFlux = rcFaceVel * A;
+            faceVel = velocity[owner].dot(vf.normal);
         }
 
-        result[owner] += faceFlux / mesh.getCellVolume(owner);
-        if (neighbour != -1)
-            result[neighbour] -= faceFlux / mesh.getCellVolume(neighbour);
+        result[owner] += faceVel * vf.area / mesh.getCellVolume(owner);
     }
 
     return result;

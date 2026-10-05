@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/BoundaryCondition.hpp"
 #include "core/Field.hpp"
 #include "core/Mesh.hpp"
 
@@ -54,21 +55,32 @@ public:
                                double                  alphaP);
 
     /**
-     * @brief Sets the cells whose pressure correction is pinned to zero (p' = 0).
+     * @brief Supplies the boundary closure used by every subsequent solve().
      *
-     * For all-wall domains (no outlet), pass an empty vector or {0} — cell 0 is
-     * used as the single reference to fix the pure-Neumann singularity.
-     * For domains with an OUTLET, pass all outlet cell IDs so the pressure
-     * gradient can develop freely between inlet and outlet.
+     * Without it, every boundary face is zero-gradient and cell 0 is pinned
+     * (legacy closure, kept for standalone use and existing tests). When set:
+     *   - The source uses the boundary-aware Rhie-Chow divergence (exact
+     *     wall/inlet fluxes, Rhie-Chow outlet faces).
+     *   - FIXED pressure faces (outlets) impose p' = 0 on the face, adding
+     *     A_f / d_b to the owner's diagonal (d_b = half-cell distance).
+     *   - Without any FIXED face (all-wall cavity) cell 0 is pinned to remove
+     *     the pure-Neumann singularity.
+     *   - The velocity correction uses a Gauss gradient of p' with p' = 0 on
+     *     FIXED faces and zero-gradient elsewhere.
+     * Reference: Ferziger, Perić & Street (2020) §7.5 and Ch. 8.
      *
-     * Must be called before the first solve(). Calling it again reconfigures the
-     * reference without rebuilding the solver.
-     *
-     * @param cells Cell IDs to pin.  Out-of-range IDs are silently ignored.
+     * @param pressureFaces Pressure closure for every boundary face.
+     * @param velocityFaces Velocity closure, same face order as pressureFaces.
+     * @throws std::invalid_argument if the lists differ in size.
      */
-    void setDirichletPressureCells(std::vector<int> cells);
+    void setBoundaryFaces(std::vector<PressureBoundaryFace> pressureFaces,
+                          std::vector<VelocityBoundaryFace> velocityFaces);
 
 private:
-    const Mesh*      m_mesh;
-    std::vector<int> m_dirichletCells;  ///< Reference cells for Neumann singularity fix
+    const Mesh* m_mesh;
+
+    std::vector<PressureBoundaryFace> m_pressureFaces;    ///< Empty → legacy closure
+    std::vector<VelocityBoundaryFace> m_velocityFaces;    ///< Same order as m_pressureFaces
+    std::vector<PressureBoundaryFace> m_correctionFaces;  ///< m_pressureFaces with p'_b = 0
+    bool m_hasFixedFace{false};  ///< At least one FIXED face → no reference cell needed
 };

@@ -5,8 +5,8 @@
  * v(x, y=0.5) centerlines, and checks RMS errors against Ghia 1982 Table 1/3.
  *
  * Thresholds (32x32 upwind, measured baseline in parentheses):
- *   u-centerline L2 < 0.10  (measured 0.071)
- *   v-centerline L2 < 0.06  (measured 0.037)
+ *   u-centerline L2 < 0.10  (measured 0.043; 0.071 before face-based BCs)
+ *   v-centerline L2 < 0.06  (measured 0.022; 0.037 before face-based BCs)
  *
  * Reference: Ghia, U., Ghia, K.N., Shin, C.T. (1982).
  *   "High-Re solutions for incompressible flow using the Navier-Stokes

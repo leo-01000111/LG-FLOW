@@ -152,10 +152,12 @@ as a stopping test.
   velocities in the divergence, solved with sparse LU.
   `solver.pressure_corrections_per_step` repeats this solve within one SIMPLE
   step. The pressure is updated with `alpha_p`.
-- Boundary conditions are applied to the predicted velocity before the pressure
-  correction and again after it.
-- Pressure reference: p' is pinned to zero on all OUTLET boundary cells. If the
-  case has no OUTLET, cell 0 is used.
+- Boundary conditions are applied as boundary-face fluxes: walls and inlets
+  prescribe the velocity on the boundary face (half a cell from the first cell
+  centre), outlets fix the pressure on the outlet face. No cell values are
+  overwritten, so the walls sit exactly at the domain edges.
+- Pressure reference: p' = 0 on OUTLET faces. If the case has no OUTLET,
+  cell 0 is pinned.
 - The time step is clamped each iteration to
   `min(dt, max_cfl_conv * h / max|u|, max_cfl_diff * h^2 / nu)`, with `h` the
   smaller cell size. The effective value is shown as `dt_eff` in the log.
@@ -210,17 +212,19 @@ case-insensitive. `value_x` takes precedence over `value`; both default to 0.
 
 | Type | Velocity | Pressure |
 |---|---|---|
-| `WALL` | Dirichlet: the boundary cells are set to `(value_x, value_y)`, so a non-zero value gives a moving wall (the lid in the cavity) | zero gradient |
-| `INLET` | Dirichlet: boundary cells set to `(value_x, value_y)` | zero gradient |
-| `PARABOLIC_INLET` (`left` or `right` only) | Poiseuille profile `6 U y (Ly - y) / Ly^2` with `U = value_x` | zero gradient |
-| `OUTLET` | zero gradient | boundary cells fixed to 0, and used as the pressure-correction reference cells |
+| `WALL` | Dirichlet on the boundary face: `(value_x, value_y)`, so a non-zero value gives a moving wall (the lid in the cavity) | zero gradient |
+| `INLET` | Dirichlet on the boundary face: `(value_x, value_y)` | zero gradient |
+| `PARABOLIC_INLET` (`left` or `right` only) | Poiseuille profile `6 U y (Ly - y) / Ly^2` with `U = value_x`, averaged over each face so the inflow is exactly `U * Ly` | zero gradient |
+| `OUTLET` | zero gradient | fixed to 0 on the outlet face |
 | `SYMMETRY` | zero gradient | zero gradient |
 
 `SYMMETRY` leaves the boundary values unchanged. It does not zero the normal
 velocity component, so it acts as a zero-gradient (slip-like) boundary only.
 
-Corner cells are written in the order left, right, bottom, top, so the top
-boundary wins at the top corners.
+Each boundary face belongs to exactly one side, so there are no corner
+conflicts. The Spalart-Allmaras model still treats the cells next to `WALL`
+faces as its wall cells (wall distance to their centres, `nu_tilde = 0` there);
+this compatibility path is documented in `BoundaryCondition.hpp`.
 
 ### Unstructured solver (`lgflow_unstruct`)
 
@@ -300,8 +304,9 @@ limit. If the reference CSV is missing, the four error rows are written as
 
 `case_validate.cfg` sets `validation.max_u_l2 = 0.10` and
 `validation.max_v_l2 = 0.06`. Comments in that file and in
-`tests/validation/test_ghia_re100.cpp` record measured errors of 0.071 (u) and
-0.037 (v) for the 32 x 32 upwind setup.
+`tests/validation/test_ghia_re100.cpp` record measured errors of 0.043 (u) and
+0.022 (v) for the 32 x 32 upwind setup (face-based boundary conditions;
+the earlier cell-overwrite boundaries gave 0.071 and 0.037).
 
 <!-- TODO: author to re-run lgflow_validate_lid on the committed code and enter the measured u_l2, u_linf, v_l2, v_linf and iteration count here. -->
 

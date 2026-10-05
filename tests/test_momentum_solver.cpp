@@ -1,10 +1,14 @@
 #include "solver/MomentumSolver.hpp"
 #include "solver/Discretization.hpp"
+#include "core/BoundaryCondition.hpp"
 #include "core/Mesh.hpp"
 #include "core/Field.hpp"
 
 #include <cmath>
 #include <gtest/gtest.h>
+#include <stdexcept>
+#include <utility>
+#include <vector>
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -330,4 +334,106 @@ TEST(DivergenceRhieChow, FiniteResult_NoNaN)
     const int N = mesh.numCells();
     for (int c = 0; c < N; ++c)
         EXPECT_TRUE(std::isfinite(div[c])) << "Non-finite RC divergence at cell " << c;
+}
+
+// ── Boundary faces (setBoundaryFaces) ─────────────────────────────────────────
+
+namespace
+{
+/// 4×8 mesh on [0, 1] × [0, 1] with a stationary bottom wall and a top wall
+/// moving at U = 1; left/right unpatched (zero-gradient).
+struct CouetteSetup
+{
+    Mesh              mesh;
+    BoundaryCondition bc;
+
+    CouetteSetup()
+    {
+        mesh.load(4, 8, 1.0, 1.0);
+        bc.addPatch("bottom", {BoundaryType::WALL, Eigen::Vector2d(0.0, 0.0)});
+        bc.addPatch("top",    {BoundaryType::WALL, Eigen::Vector2d(1.0, 0.0)});
+    }
+
+    /// Exact Couette profile u_x = y at the cell centres.
+    [[nodiscard]] Field<Eigen::Vector2d> exactProfile() const
+    {
+        Field<Eigen::Vector2d> u(mesh, Eigen::Vector2d::Zero());
+        for (int i = 0; i < mesh.Nx(); ++i)
+            for (int j = 0; j < mesh.Ny(); ++j)
+                u(i, j) = Eigen::Vector2d(mesh.getCellCenter(i, j).y(), 0.0);
+        return u;
+    }
+};
+}  // namespace
+
+TEST(MomentumSolver, SetBoundaryFaces_Couette_ExactProfileIsSteady)
+{
+    // u_x = y satisfies the discrete viscous operator exactly when the walls
+    // sit on the boundary faces (half-cell distance), so the predictor must
+    // return it unchanged. The legacy zero-gradient closure would not.
+    CouetteSetup s;
+    MomentumSolver solver(s.mesh);
+    solver.setBoundaryFaces(s.bc.buildVelocityFaces(s.mesh), s.bc.buildPressureFaces(s.mesh));
+
+    const Field<Eigen::Vector2d> uOld = s.exactProfile();
+    Field<Eigen::Vector2d>       uStar(s.mesh, Eigen::Vector2d::Zero());
+    const Field<double>          p(s.mesh, 0.0);
+
+    solver.solve(uStar, uOld, p, 1.0, 1.0, 0.1, ConvectionScheme::UPWIND, 1.0);
+
+    for (int c = 0; c < s.mesh.numCells(); ++c)
+    {
+        EXPECT_NEAR(uStar[c].x(), uOld[c].x(), 1e-12) << "cell " << c;
+        EXPECT_NEAR(uStar[c].y(), 0.0,         1e-12) << "cell " << c;
+    }
+}
+
+TEST(MomentumSolver, SetBoundaryFaces_CouetteVariableNu_ExactProfileIsSteady)
+{
+    CouetteSetup s;
+    MomentumSolver solver(s.mesh);
+    solver.setBoundaryFaces(s.bc.buildVelocityFaces(s.mesh), s.bc.buildPressureFaces(s.mesh));
+
+    const Field<Eigen::Vector2d> uOld = s.exactProfile();
+    Field<Eigen::Vector2d>       uStar(s.mesh, Eigen::Vector2d::Zero());
+    const Field<double>          p(s.mesh, 0.0);
+    const Field<double>          nuEff(s.mesh, 0.1);
+
+    solver.solve(uStar, uOld, p, nuEff, 1.0, 1.0, ConvectionScheme::CENTRAL, 1.0);
+
+    for (int c = 0; c < s.mesh.numCells(); ++c)
+        EXPECT_NEAR(uStar[c].x(), uOld[c].x(), 1e-12) << "cell " << c;
+}
+
+TEST(MomentumSolver, SetBoundaryFaces_StillFluidMovingLid_DragsTopRow)
+{
+    // Fluid at rest under a moving lid: only the top row feels the wall shear
+    // in one implicit step's source, and it must move in +x.
+    CouetteSetup s;
+    MomentumSolver solver(s.mesh);
+    solver.setBoundaryFaces(s.bc.buildVelocityFaces(s.mesh), s.bc.buildPressureFaces(s.mesh));
+
+    const Field<Eigen::Vector2d> uOld(s.mesh, Eigen::Vector2d::Zero());
+    Field<Eigen::Vector2d>       uStar(s.mesh, Eigen::Vector2d::Zero());
+    const Field<double>          p(s.mesh, 0.0);
+
+    solver.solve(uStar, uOld, p, 0.01, 1.0, 0.1, ConvectionScheme::UPWIND, 1.0);
+
+    const int top = s.mesh.Ny() - 1;
+    for (int i = 0; i < s.mesh.Nx(); ++i)
+    {
+        EXPECT_GT(uStar(i, top).x(), 0.0)              << "top row i=" << i;
+        EXPECT_GT(uStar(i, top).x(), uStar(i, 0).x())  << "column i=" << i;
+    }
+}
+
+TEST(MomentumSolver, SetBoundaryFaces_MismatchedLists_Throws)
+{
+    CouetteSetup s;
+    MomentumSolver solver(s.mesh);
+    std::vector<PressureBoundaryFace> pf = s.bc.buildPressureFaces(s.mesh);
+    pf.pop_back();
+
+    EXPECT_THROW(solver.setBoundaryFaces(s.bc.buildVelocityFaces(s.mesh), std::move(pf)),
+                 std::invalid_argument);
 }

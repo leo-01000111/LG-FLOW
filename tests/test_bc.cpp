@@ -248,3 +248,144 @@ TEST(BoundaryCondition, CollectCellsOfType_LeftInlet_CorrectCellIds)
         EXPECT_EQ(cells[static_cast<std::size_t>(j)], j)
             << "Left inlet cell j=" << j << " should have id=" << j;
 }
+
+// ── buildVelocityFaces / buildPressureFaces ───────────────────────────────────
+
+namespace
+{
+/// Channel mesh: 8×4 cells on [0, 2] × [0, 1] → dx = 0.25, dy = 0.25.
+Mesh makeChannelMesh()
+{
+    Mesh m;
+    m.load(8, 4, 2.0, 1.0);
+    return m;
+}
+
+BoundaryCondition makeChannelBC(BoundaryType inletType)
+{
+    BoundaryCondition bc;
+    bc.addPatch("left",   {inletType,            Eigen::Vector2d(1.0, 0.0)});
+    bc.addPatch("right",  {BoundaryType::OUTLET, Eigen::Vector2d::Zero()});
+    bc.addPatch("bottom", {BoundaryType::WALL,   Eigen::Vector2d::Zero()});
+    bc.addPatch("top",    {BoundaryType::WALL,   Eigen::Vector2d::Zero()});
+    return bc;
+}
+}  // namespace
+
+TEST(BoundaryCondition, BuildVelocityFaces_Channel_OneEntryPerBoundaryFace)
+{
+    const Mesh mesh = makeChannelMesh();
+    const BoundaryCondition bc = makeChannelBC(BoundaryType::INLET);
+
+    const std::vector<VelocityBoundaryFace> faces = bc.buildVelocityFaces(mesh);
+
+    // 2·Ny x-faces + 2·Nx y-faces = 8 + 16
+    EXPECT_EQ(static_cast<int>(faces.size()), 2 * mesh.Ny() + 2 * mesh.Nx());
+    for (std::size_t k = 1; k < faces.size(); ++k)
+        EXPECT_LT(faces[k - 1].face, faces[k].face) << "not in ascending face order";
+}
+
+TEST(BoundaryCondition, BuildVelocityFaces_Channel_KindsMatchPatchTypes)
+{
+    const Mesh mesh = makeChannelMesh();
+    const BoundaryCondition bc = makeChannelBC(BoundaryType::INLET);
+
+    for (const VelocityBoundaryFace& f : bc.buildVelocityFaces(mesh))
+    {
+        if (f.normal.x() > 0.5)  // right: outlet
+        {
+            EXPECT_EQ(f.kind, VelocityBCKind::ZERO_GRADIENT);
+        }
+        else if (f.normal.x() < -0.5)  // left: uniform inlet
+        {
+            EXPECT_EQ(f.kind, VelocityBCKind::DIRICHLET);
+            EXPECT_NEAR(f.value.x(), 1.0, 1e-12);
+            EXPECT_NEAR(f.value.y(), 0.0, 1e-12);
+        }
+        else  // top / bottom: stationary walls
+        {
+            EXPECT_EQ(f.kind, VelocityBCKind::DIRICHLET);
+            EXPECT_NEAR(f.value.norm(), 0.0, 1e-12);
+        }
+    }
+}
+
+TEST(BoundaryCondition, BuildVelocityFaces_Channel_DistanceIsHalfCell)
+{
+    const Mesh mesh = makeChannelMesh();  // dx = dy = 0.25
+    const BoundaryCondition bc = makeChannelBC(BoundaryType::INLET);
+
+    for (const VelocityBoundaryFace& f : bc.buildVelocityFaces(mesh))
+    {
+        EXPECT_NEAR(f.distance, 0.125, 1e-12) << "face " << f.face;
+        EXPECT_NEAR(f.area,     0.25,  1e-12) << "face " << f.face;
+    }
+}
+
+TEST(BoundaryCondition, BuildVelocityFaces_ParabolicInlet_FluxEqualsUavgTimesH)
+{
+    const Mesh mesh = makeChannelMesh();  // H = 1, U_avg = 1
+    const BoundaryCondition bc = makeChannelBC(BoundaryType::PARABOLIC_INLET);
+
+    double inflow = 0.0;
+    for (const VelocityBoundaryFace& f : bc.buildVelocityFaces(mesh))
+        if (f.normal.x() < -0.5)
+            inflow += f.value.x() * f.area;
+
+    // Face values are face averages of the profile, so the discrete inflow is
+    // exact (a point-sampled profile would give U·H·(1 + dy²/(2H²)) = 1.03125).
+    EXPECT_NEAR(inflow, 1.0, 1e-12);
+}
+
+TEST(BoundaryCondition, BuildVelocityFaces_ParabolicOnTop_Throws)
+{
+    const Mesh mesh = makeChannelMesh();
+    BoundaryCondition bc;
+    bc.addPatch("top", {BoundaryType::PARABOLIC_INLET, Eigen::Vector2d(1.0, 0.0)});
+
+    EXPECT_THROW(static_cast<void>(bc.buildVelocityFaces(mesh)), std::invalid_argument);
+}
+
+TEST(BoundaryCondition, BuildPressureFaces_Channel_OnlyOutletIsFixed)
+{
+    const Mesh mesh = makeChannelMesh();
+    const BoundaryCondition bc = makeChannelBC(BoundaryType::INLET);
+
+    for (const PressureBoundaryFace& f : bc.buildPressureFaces(mesh))
+    {
+        if (f.normal.x() > 0.5)
+        {
+            EXPECT_EQ(f.kind, PressureBCKind::FIXED);
+            EXPECT_NEAR(f.value, 0.0, 1e-12);
+        }
+        else
+        {
+            EXPECT_EQ(f.kind, PressureBCKind::ZERO_GRADIENT);
+        }
+    }
+}
+
+TEST(BoundaryCondition, BuildFaces_SameMesh_VelocityAndPressureOrderMatch)
+{
+    const Mesh mesh = makeChannelMesh();
+    const BoundaryCondition bc = makeChannelBC(BoundaryType::INLET);
+
+    const std::vector<VelocityBoundaryFace> vf = bc.buildVelocityFaces(mesh);
+    const std::vector<PressureBoundaryFace> pf = bc.buildPressureFaces(mesh);
+
+    ASSERT_EQ(vf.size(), pf.size());
+    for (std::size_t k = 0; k < vf.size(); ++k)
+    {
+        EXPECT_EQ(vf[k].face,  pf[k].face);
+        EXPECT_EQ(vf[k].owner, pf[k].owner);
+    }
+}
+
+TEST(BoundaryCondition, BuildVelocityFaces_NoPatches_AllZeroGradient)
+{
+    const Mesh mesh = makeChannelMesh();
+    const BoundaryCondition bc;
+
+    for (const VelocityBoundaryFace& f : bc.buildVelocityFaces(mesh))
+        EXPECT_EQ(f.kind, VelocityBCKind::ZERO_GRADIENT);
+}

@@ -202,22 +202,14 @@ void NavierStokesSolver::initialize()
     m_pressureSolver.emplace(m_mesh);
     m_momentumSolver.emplace(m_mesh);
 
-    // Wire Dirichlet reference cells for the pressure-correction Poisson system.
-    // OUTLET cells pin p' = 0 so the pressure gradient develops between inlet
-    // and outlet.  If no outlet exists (all-wall), fall back to cell 0 (corner).
-    {
-        std::vector<int> refCells =
-            m_bc.collectCellsOfType(BoundaryType::OUTLET, m_mesh);
-        if (refCells.empty())
-            refCells = {0};
-        m_pressureSolver->setDirichletPressureCells(std::move(refCells));
-    }
-
-    // Apply boundary conditions to set initial field values at boundaries.
-    // Boundary conditions are applied after each field update in the SIMPLE loop;
-    // applying once here sets correct initial values for the first iteration.
-    m_bc.applyVelocity(m_velocity.value(), m_mesh);
-    m_bc.applyPressure(m_pressure.value(), m_mesh);
+    // Build the boundary-face closures once and give each solver its copy.
+    // Walls and inlets are Dirichlet on the boundary faces (y = 0, y = Ly, ...),
+    // outlets fix p = 0 on the outlet face; all cells remain unknowns.
+    // Reference: Ferziger, Perić & Street (2020) Ch. 8 (boundary conditions).
+    m_velocityFaces = m_bc.buildVelocityFaces(m_mesh);
+    m_pressureFaces = m_bc.buildPressureFaces(m_mesh);
+    m_momentumSolver->setBoundaryFaces(m_velocityFaces, m_pressureFaces);
+    m_pressureSolver->setBoundaryFaces(m_pressureFaces, m_velocityFaces);
 
     m_initialized     = true;
     m_velResidual     = 1.0;
@@ -228,6 +220,9 @@ void NavierStokesSolver::initialize()
     if (m_useSA)
     {
         // BFS wall distance from WALL-type boundary cells.
+        // COMPAT: wall cells are the owners of WALL faces; distances are
+        // measured to their centres, so they are offset by half a cell from
+        // the true wall at the face. See BoundaryCondition::collectCellsOfType.
         m_wallDist.emplace(WallDistance::compute(m_mesh, m_bc));
         // ν̃ initialized to freestream value everywhere.
         m_nuTilde.emplace(m_mesh, m_nuTildeFreestream);
@@ -236,6 +231,7 @@ void NavierStokesSolver::initialize()
         // Construct SA model bound to the loaded mesh.
         m_saModel.emplace(m_mesh);
         // Enforce no-slip ν̃ = 0 at wall cells (Spalart & Allmaras 1994).
+        // COMPAT: imposed on the wall-adjacent cells, not on the wall faces.
         for (int c : m_bc.collectCellsOfType(BoundaryType::WALL, m_mesh))
             (*m_nuTilde)[c] = 0.0;
     }
@@ -316,25 +312,16 @@ void NavierStokesSolver::step(double dt)
             uStar, uOld, m_pressure.value(), m_dtEff, m_rho, m_nu, m_convScheme, m_alphaU);
     }
 
-    // ── 1b. Apply BCs to u* before pressure correction ───────────────────────
-    // The pressure Poisson equation must see the correct prescribed boundary
-    // velocities (lid, walls) so it can account for the exact boundary fluxes
-    // when driving interior divergence to zero.  Applying BCs here — rather
-    // than only after the pressure correction — prevents the BC reset at step 4
-    // from invalidating the divergence reduction achieved by the pressure solver.
-    m_bc.applyVelocity(uStar, m_mesh);
-
-
     // ── Continuity residual (div_RC of u*, before pressure correction) ───────
     // Measures the mass imbalance in the momentum-predicted velocity — the
     // same quantity the pressure correction step will drive toward zero.
-    // At convergence u* ≈ u^{k-1} and this residual → 0 for both cavity and
-    // channel flows.  After correction the committed velocity has a different
-    // (non-zero) div_RC because of pressure under-relaxation and the outlet
-    // pressure BC, so measuring on uNew would give a misleading persistent offset.
+    // Boundary fluxes come from the face closures (exact at walls and inlets,
+    // Rhie-Chow at outlets), so at convergence u* ≈ u^{k-1} and this residual
+    // → 0 for both cavity and channel flows.
     // Reference: Rhie & Chow (1983); Ferziger & Perić (2020) §7.4.
     m_contResidual = Discretization::divergenceRhieChow(
-        uStar, m_pressure.value(), m_mesh, m_dtEff, m_rho).norm();
+        uStar, m_pressure.value(), m_mesh, m_dtEff, m_rho,
+        m_velocityFaces, m_pressureFaces).norm();
 
     // ── 2. Pressure correction ────────────────────────────────────────────────
     // PressureSolver::solve updates uStar and m_pressure in place.
@@ -354,14 +341,10 @@ void NavierStokesSolver::step(double dt)
     // that the pressure correction just achieved.
     Field<Eigen::Vector2d> uNew = uStar;
 
-    // ── 4. Apply boundary conditions ──────────────────────────────────────────
-    // BCs applied after each field update, not before (CLAUDE.md convention).
-    m_bc.applyVelocity(uNew, m_mesh);
-    m_bc.applyPressure(m_pressure.value(), m_mesh);
+    // Boundary conditions were applied through the boundary-face fluxes in
+    // steps 1–2; no cell values are overwritten here.
 
     // ── Velocity residual ─────────────────────────────────────────────────────
-    // Measured from the committed (post-BC) velocity so it captures the full
-    // change including Dirichlet enforcement at the boundaries.
     const Field<Eigen::Vector2d> diff = uNew + uOld * (-1.0);
     m_velResidual = diff.norm() / std::max(uOld.norm(), 1e-12);
 
@@ -453,13 +436,10 @@ void NavierStokesSolver::run(int maxIter)
                               m_pressure.value(), m_velocity.value());
         }
 
-        // Convergence: velocity residual drives the check.  The continuity
-        // residual (div_RC of u*) is logged for diagnostics.  For open-boundary
-        // flows (INLET/OUTLET) the RC correction at cells adjacent to prescribed
-        // velocity BCs creates a structural non-zero offset (~0.15 for this grid)
-        // that cannot be driven to zero by more iterations — it is a property of
-        // the collocated SIMPLE+RC discretisation, not an indication of non-convergence.
-        // The velocity residual is the physically correct convergence criterion.
+        // Convergence: velocity residual drives the check; the continuity
+        // residual (div_RC of u*) is logged for diagnostics. With boundary-face
+        // fluxes it converges for open-boundary flows too (the former ~0.15
+        // structural offset came from overwriting boundary cells).
         if (m_velResidual < m_tolerance)
         {
             Logger::get().info(
