@@ -314,7 +314,16 @@ limit. If the reference CSV is missing, the four error rows are written as
 0.022 (v) for the 32 x 32 upwind setup (face-based boundary conditions;
 the earlier cell-overwrite boundaries gave 0.071 and 0.037).
 
-<!-- TODO: author to re-run lgflow_validate_lid on the committed code and enter the measured u_l2, u_linf, v_l2, v_linf and iteration count here. -->
+Measured on 2026-10-27 (Release, MSVC) with
+`lgflow_validate_lid cases/lid_driven_cavity/case_validate.cfg 2000`:
+
+| Metric | Value |
+|---|---|
+| Iterations to convergence | 1376 |
+| Final velocity residual | 9.99e-6 |
+| Final relative continuity residual | 7.15e-6 |
+| u centreline L2 / Linf | 0.0432 / 0.113 |
+| v centreline L2 / Linf | 0.0221 / 0.0389 |
 
 Exit codes of `lgflow_validate_lid`:
 
@@ -395,13 +404,14 @@ an estimated 1.5 hours. To skip the test in a quick run, use
 boundary conditions, config parsing, logger, momentum and pressure solvers,
 solver parameter checks and run loop, convection schemes, VTK writer,
 unstructured mesh and field containers, wall distance and the Spalart-Allmaras
-closure functions. Counting `TEST` and `TEST_F` macros gives 223 test cases
-across `tests/` (220 in `lgflow_tests` and 3 in `lgflow_validation_tests`).
+closure functions.
+
+A Release `ctest` run on 2026-10-27, excluding the slow `PoiseuilleChannel`
+(`ctest -C Release -E PoiseuilleChannel`), passed 249 of 249 tests in 24 s. One
+test, `SpallartAllmaras.NavierStokesSolver_Integration_OneStep`, is skipped.
 
 There are no tests that run the unstructured solver or the Gmsh reader on a full
 case.
-
-<!-- TODO: author to confirm the pass count from a fresh ctest run (the 223 above is a source count, not a run result). -->
 
 ## GUI (`lgflow_ui`)
 
@@ -479,8 +489,7 @@ generated from the `mesh.*` keys instead.
 
 <!-- TODO: author to add measured results for channel_unstruct and flat_plate once they have been run and checked against a reference. -->
 
-`HISTORY.md` records work up to Phase 9. The later commits (SIMPLE fixes,
-INLET/OUTLET, GUI, unstructured solver, Spalart-Allmaras) have no entries there.
+`HISTORY.md` is the engineering log, with one entry per change.
 
 ## License
 
