@@ -788,3 +788,35 @@ Rules:
 - Risks/TODOs:
   - In the current cases the relative continuity residual falls faster than the velocity
     residual, so the new criterion does not yet change any iteration count.
+
+## 2026-10-27 19:01 (Europe/Warsaw) - Poiseuille Channel Validation With Grid Refinement
+- Author: Claude Code
+- Status: committed
+- Summary:
+  - New CTest `PoiseuilleChannel` (executable `lgflow_poiseuille_validation`, labels
+    `slow;validation`): uniform inflow at Re_H = 100 develops into plane Poiseuille flow
+    u(y) = 6U(y/H)(1 - y/H) (White 2006, §6-2). Lx = 3 x Chen (1973) entrance length = 14 H.
+  - Grid refinement Ny = 8, 16, 32, 64 (dx/dy = 4). Per level: convergence, flow rate
+    Q = Σ u·dy within 1e-3 of U·H at the developed stations, RMSE of u(y) at x = 0.9 Lx and Q
+    error at x = 1 H both decreasing. Finest pair: observed order in [1.75, 3.0], relative RMSE
+    < 2e-3, Q error at x = 1 H < 1e-3. Extra levels only within `LGFLOW_VALIDATION_BUDGET_S`.
+  - The draft checked Q in the first cell column: 4.4 % error at Ny = 8. Q is summed from
+    cell-centre velocities, which differ from the conserved face fluxes by O(dx²·∂²u/∂x²),
+    large where the uniform inflow meets the walls. Moved the station to x = 1 H and required
+    it to converge (6.4e-3, 5.1e-4, 1.2e-5, 1.2e-6) instead of meeting the tolerance per level.
+  - New config `cases/channel_flow/case_validate.cfg`; `validation.max_rel_rmse` set to 2e-3.
+  - README: Poiseuille section, measured Ghia numbers and a fresh ctest count (fills two TODOs).
+- Files changed:
+  - `tests/validation/test_poiseuille_channel.cpp`, `tests/validation/CMakeLists.txt`
+  - `cases/channel_flow/case_validate.cfg`, `README.md`
+- Validation:
+  - `cmake --build build --config Release`, then
+    `ctest --test-dir build -C Release -E PoiseuilleChannel`: 249/249 passed (1 skipped).
+  - `lgflow_validate_lid cases/lid_driven_cavity/case_validate.cfg 2000`: 1376 iterations,
+    u L2/Linf 0.0432/0.113, v L2/Linf 0.0221/0.0389 (unchanged).
+  - `ctest --test-dir build -C Release -R PoiseuilleChannel`: relative RMSE 1.02e-2, 2.65e-3,
+    6.79e-4, 1.80e-4 (orders 1.94, 1.96, 1.92); developed-station Q errors <= 2.1e-6.
+    Passed in 503 s (four levels); level 5 (Ny = 128) predicted at 5494 s and skipped.
+- Risks/TODOs:
+  - A plain `ctest` now takes about 9 minutes; use `ctest -LE slow` for quick runs.
+  - Re = 1000 cavity comparison still open (no reference data in the repo).

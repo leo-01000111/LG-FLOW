@@ -100,9 +100,10 @@ ctest --test-dir build --output-on-failure -C Debug
 | `lgflow_ui` | `src/ui/main_ui.cpp` | SFML 3 GUI, built only if SFML 3 is found |
 | `lgflow_tests` | `tests/*.cpp` | GoogleTest unit tests |
 | `lgflow_validation_tests` | `tests/validation/test_ghia_re100.cpp` | Ghia Re = 100 regression test, registered in CTest as `GhiaRe100` |
+| `lgflow_poiseuille_validation` | `tests/validation/test_poiseuille_channel.cpp` | Poiseuille channel grid-refinement study, registered in CTest as `PoiseuilleChannel` (slow) |
 
 All commands that read `cases/...` should be run from the repository root. CTest
-sets the working directory for `GhiaRe100` itself.
+sets the working directory for `GhiaRe100` and `PoiseuilleChannel` itself.
 
 ## Running the solver
 
@@ -333,6 +334,61 @@ three tests: the velocity residual must fall below `1e-4`, and the u and v
 centreline L2 errors must be below 0.10 and 0.06. It is skipped if the case
 files are not found.
 
+## Validation: Poiseuille channel flow (grid refinement)
+
+`lgflow_poiseuille_validation` (CTest name `PoiseuilleChannel`, labels `slow`
+and `validation`) solves `cases/channel_flow/case_validate.cfg`: a uniform
+inflow U = 1 m/s between two no-slip walls at Re_H = U·H/ν = 100. It checks that
+the flow develops into the analytical plane Poiseuille profile
+u(y) = 6·U·(y/H)·(1 − y/H) (White 2006, §6-2).
+
+The domain length is 3 times the parallel-plate entrance length of Chen (1973),
+rounded up to whole coarse cells (Lx = 14 H). The test runs the case on meshes
+with Ny = 8, 16, 32, … cells across the channel and the same cell aspect ratio
+dx/dy = 4 on every level. It checks the following on each level:
+
+- the solver converges (velocity residual < 1e-8, relative continuity < 1e-6);
+- the flow rate Q = Σ u·dy, summed from cell-centre velocities, equals U·H
+  within `validation.max_q_error` at mid-channel, the profile station and the
+  last cell column;
+- the Q error at x = 1 H and the RMSE of u(y) against the analytical profile at
+  x = 0.9 Lx (divided by u_max = 1.5 U) are both lower than on the previous
+  level.
+
+Cell-centre velocities match the conserved face fluxes only up to a term of
+order dx²·∂²u/∂x². That term is large near the inlet, where the uniform inflow
+meets the walls, so x = 1 H only has to converge under refinement. It has to
+meet the tolerance on the finest level only.
+
+After the last level, the observed order of accuracy of the two finest levels,
+p = log2(E_coarse / E_fine), must lie between `validation.min_order` and
+`validation.max_order`. The finest RMSE must be below `validation.max_rel_rmse`,
+and the finest Q error at x = 1 H below `validation.max_q_error`. The first three levels always run. A further level
+runs only if its predicted time fits the budget set by the environment variable
+`LGFLOW_VALIDATION_BUDGET_S` (default 1800 s). The CTest timeout is 2400 s, so a
+larger budget also needs `ctest --timeout <s>`.
+
+```bash
+ctest --test-dir build -C Release -R PoiseuilleChannel --output-on-failure
+```
+
+Measured on 2026-10-27 (Release, MSVC, default budget). Q error columns are
+|Q − U·H| / (U·H):
+
+| Ny | Nx | Time [s] | Relative RMSE | Q error at 1 H | Q error, developed stations (max) |
+|---|---|---|---|---|---|
+| 8 | 28 | 0.5 | 1.02e-2 | 6.4e-3 | 2.1e-6 |
+| 16 | 56 | 4.4 | 2.65e-3 | 5.1e-4 | 2.2e-7 |
+| 32 | 112 | 38 | 6.79e-4 | 1.2e-5 | 2.6e-8 |
+| 64 | 224 | 460 | 1.80e-4 | 1.2e-6 | 3.1e-9 |
+
+The observed order is 1.94, 1.96 and 1.92 for the successive pairs. It is
+second order, as expected from the central-differenced diffusion term, which
+dominates in fully developed flow, where convection vanishes. The default budget
+runs four levels, about 8.5 minutes in total. A fifth level (Ny = 128) would take
+an estimated 1.5 hours. To skip the test in a quick run, use
+`ctest -LE slow`.
+
 ## Test suite
 
 `lgflow_tests` covers the mesh, field algebra, discretisation operators,
@@ -370,8 +426,9 @@ unstructured solver or the turbulence cases.
 | `cases/flat_plate/case.cfg` | structured, `solver.turbulence = SA` | 64 x 32 cells over 1.0 by 0.2, `INLET` left, `OUTLET` right, `WALL` bottom, `SYMMETRY` top |
 | `cases/channel_unstruct/case.cfg` | unstructured | Channel on the Gmsh mesh `cases/channel_unstruct/channel.msh`, patches `inlet`, `outlet`, `wall_bottom`, `wall_top` |
 
-The channel_flow case file names the analytical Poiseuille profile as its
-reference, but no executable compares the result with it.
+`case.cfg` starts from the analytical Poiseuille profile at the inlet. The
+automated comparison uses `case_validate.cfg` instead, which has a uniform inlet
+(see "Validation: Poiseuille channel flow").
 
 ## Project structure
 
@@ -383,7 +440,7 @@ LG-FLOW/
 ├── HISTORY.md                 # engineering log (last entry covers Phase 9)
 ├── README.md
 ├── cases/
-│   ├── channel_flow/          # case.cfg
+│   ├── channel_flow/          # case.cfg, case_validate.cfg
 │   ├── channel_unstruct/      # case.cfg, channel.msh
 │   ├── flat_plate/            # case.cfg
 │   └── lid_driven_cavity/     # case.cfg, case_validate.cfg, ghia1982_re100.csv
@@ -414,7 +471,7 @@ generated from the `mesh.*` keys instead.
 | Structured mesh, fields, discretisation operators, BCs | Implemented and unit tested |
 | SIMPLE loop with implicit viscous term, Rhie-Chow, CFL clamp, upwind and central convection | Implemented and unit tested |
 | Lid-driven cavity vs Ghia et al. (1982), Re = 100 | Implemented, with thresholds on the L2 errors enforced by `lgflow_validate_lid` and `GhiaRe100` |
-| INLET, OUTLET, PARABOLIC_INLET with pressure reference cells; `channel_flow` case | Implemented; no comparison with the analytical profile is automated |
+| INLET, OUTLET, PARABOLIC_INLET with pressure reference cells; `channel_flow` case | Implemented. Developed profile vs analytical Poiseuille, second-order grid convergence enforced by `PoiseuilleChannel` |
 | GUI (`lgflow_ui`) | Implemented for the two structured cases listed above |
 | Unstructured-mesh solver and Gmsh reader | Work in progress. Mesh and field containers have unit tests. The solver has no tests and no validation case. |
 | Spalart-Allmaras model with wall distance | Work in progress. Implemented in the structured solver only. The closure functions, wall distance and a one-step smoke test on an 8 x 8 mesh are tested. No result has been compared with a reference such as a flat plate skin-friction correlation. |
