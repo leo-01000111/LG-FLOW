@@ -251,7 +251,7 @@ The unstructured solver always uses explicit upwind convection and does not read
 `solver.convection_scheme`, the CFL keys, `solver.pressure_corrections_per_step`
 or the turbulence keys.
 
-## Validation: lid-driven cavity at Re = 100
+## Validation: lid-driven cavity at Re = 100 and Re = 1000
 
 The validation benchmark is the lid-driven cavity at Re = 100 (`nu = 0.01`,
 lid speed 1, unit square), compared with the centreline data in
@@ -261,8 +261,10 @@ lid speed 1, unit square), compared with the centreline data in
 > incompressible flow using the Navier-Stokes equations and a multigrid
 > method.* Journal of Computational Physics, 48(3), 387-411.
 
-Only the Re = 100 reference data is in the repository. No Re = 1000 comparison
-is implemented.
+The Re = 1000 case (`case_validate_re1000.cfg`, `nu = 0.001`) uses
+`cases/lid_driven_cavity/ghia1982_re1000.csv` from the same paper (Tables I and
+II). The config key `validation.reference` selects the reference file. The
+default is the Re = 100 file.
 
 ### Running the validation executable
 
@@ -304,6 +306,7 @@ limit. If the reference CSV is missing, the four error rows are written as
 
 | Key | Description |
 |---|---|
+| `validation.reference` | Reference CSV to compare with (default `cases/lid_driven_cavity/ghia1982_re100.csv`). |
 | `validation.max_u_l2` | Fails if the u-centreline L2 error is larger. Ignored when the reference CSV is missing. |
 | `validation.max_v_l2` | Fails if the v-centreline L2 error is larger. Ignored when the reference CSV is missing. |
 | `validation.max_cont_residual` | Fails if the final relative continuity residual is larger. |
@@ -342,6 +345,30 @@ only return 0 or 1 and never fail on accuracy.
 three tests: the velocity residual must fall below `1e-4`, and the u and v
 centreline L2 errors must be below 0.10 and 0.06. It is skipped if the case
 files are not found.
+
+### Re = 1000
+
+CTest `GhiaRe1000` (labels `slow` and `validation`, about 3 minutes) runs
+`lgflow_validate_lid cases/lid_driven_cavity/case_validate_re1000.cfg 20000`
+and fails on a non-zero exit code. The config uses a 64 x 64 mesh with upwind
+convection and sets `validation.max_u_l2 = 0.15`, `validation.max_v_l2 = 0.18`
+and `validation.max_cont_residual = 1e-4`.
+
+Measured on 2026-10-27 (Release, MSVC), upwind convection:
+
+| Mesh | u L2 / Linf | v L2 / Linf | Iterations | Time |
+|---|---|---|---|---|
+| 32 x 32 | 0.172 / 0.334 | 0.212 / 0.371 | 4402 | 35 s |
+| 64 x 64 | 0.103 / 0.184 | 0.124 / 0.201 | 5111 | 200 s |
+| 128 x 128 | 0.063 / 0.110 | 0.070 / 0.100 | 9616 | 2371 s |
+
+The errors are several times larger than at Re = 100 and fall by only about
+1.7 per mesh doubling. The numerical diffusion of first-order upwind
+convection is large compared with the physical viscosity at Re = 1000. Central
+differencing diverges on the 64 x 64 mesh, because the cell Péclet number
+U·dx/ν = 16 is far above the limit of 2 for a bounded central scheme. Closer
+agreement needs a bounded higher-order convection scheme, which is not
+implemented.
 
 ## Validation: Poiseuille channel flow (grid refinement)
 
@@ -407,8 +434,10 @@ unstructured mesh and field containers, wall distance and the Spalart-Allmaras
 closure functions.
 
 A Release `ctest` run on 2026-10-27, excluding the slow `PoiseuilleChannel`
-(`ctest -C Release -E PoiseuilleChannel`), passed 249 of 249 tests in 24 s. One
-test, `SpallartAllmaras.NavierStokesSolver_Integration_OneStep`, is skipped.
+(`ctest -C Release -E PoiseuilleChannel`), passed 250 of 250 tests in 198 s,
+171 s of it `GhiaRe1000`. One test,
+`SpallartAllmaras.NavierStokesSolver_Integration_OneStep`, is skipped.
+`ctest -LE slow` skips both slow validation cases.
 
 There are no tests that run the unstructured solver or the Gmsh reader on a full
 case.
@@ -480,7 +509,7 @@ generated from the `mesh.*` keys instead.
 |---|---|
 | Structured mesh, fields, discretisation operators, BCs | Implemented and unit tested |
 | SIMPLE loop with implicit viscous term, Rhie-Chow, CFL clamp, upwind and central convection | Implemented and unit tested |
-| Lid-driven cavity vs Ghia et al. (1982), Re = 100 | Implemented, with thresholds on the L2 errors enforced by `lgflow_validate_lid` and `GhiaRe100` |
+| Lid-driven cavity vs Ghia et al. (1982), Re = 100 and Re = 1000 | Implemented, with thresholds on the L2 errors enforced by `lgflow_validate_lid`, `GhiaRe100` and `GhiaRe1000` (Re = 1000 accuracy limited by upwind convection) |
 | INLET, OUTLET, PARABOLIC_INLET with pressure reference cells; `channel_flow` case | Implemented. Developed profile vs analytical Poiseuille, second-order grid convergence enforced by `PoiseuilleChannel` |
 | GUI (`lgflow_ui`) | Implemented for the two structured cases listed above |
 | Unstructured-mesh solver and Gmsh reader | Work in progress. Mesh and field containers have unit tests. The solver has no tests and no validation case. |

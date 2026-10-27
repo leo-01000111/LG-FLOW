@@ -35,6 +35,16 @@ add_test(
 )
 set_tests_properties(GhiaRe100 PROPERTIES TIMEOUT 120)
 
+# ── Ghia Re=1000 cavity (64x64 upwind, ~3 min) ───────────────────────────────
+# Runs the validation executable itself: exit code 2 when a threshold in
+# case_validate_re1000.cfg is exceeded, 1 on a fatal error.
+add_test(
+    NAME GhiaRe1000
+    COMMAND lgflow_validate_lid cases/lid_driven_cavity/case_validate_re1000.cfg 20000
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)
+set_tests_properties(GhiaRe1000 PROPERTIES TIMEOUT 900 LABELS "slow;validation")
+
 # ── Poiseuille channel refinement study (separate executable) ────────────────
 # Kept separate from the Ghia executable so it can be run, filtered and timed
 # on its own. Time budget: environment variable LGFLOW_VALIDATION_BUDGET_S

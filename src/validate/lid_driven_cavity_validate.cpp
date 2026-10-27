@@ -24,7 +24,8 @@
  *                 Reported at each cell centre x in [0, Lx].
  *
  * Benchmark comparison:
- *   Reference file: cases/lid_driven_cavity/ghia1982_re100.csv
+ *   Reference file: config key validation.reference
+ *                   (default cases/lid_driven_cavity/ghia1982_re100.csv)
  *   Matching: nearest-neighbour by coord value.
  *   Metrics: L2 (sqrt(mean squared error)) and Linf (max absolute error).
  *   No hard threshold is enforced — metrics are reported informally.
@@ -281,8 +282,8 @@ int main(int argc, char* argv[])
                   << vSamples.size() << " v-points)\n";
 
         // Load reference data and compute error metrics
-        const std::string refPath =
-            "cases/lid_driven_cavity/ghia1982_re100.csv";
+        const std::string refPath = cfg.get<std::string>(
+            "validation.reference", "cases/lid_driven_cavity/ghia1982_re100.csv");
         const auto refs      = loadReference(refPath);
         const bool refAvail  = !refs.empty();
 

@@ -820,3 +820,32 @@ Rules:
 - Risks/TODOs:
   - A plain `ctest` now takes about 9 minutes; use `ctest -LE slow` for quick runs.
   - Re = 1000 cavity comparison still open (no reference data in the repo).
+
+## 2026-10-27 19:55 (Europe/Warsaw) - Lid-Driven Cavity Validation at Re = 1000
+- Author: Claude Code
+- Status: committed
+- Summary:
+  - New reference `cases/lid_driven_cavity/ghia1982_re1000.csv`: Ghia et al. (1982) Tables I
+    and II, Re = 1000 column, cross-checked against three independent digital copies (one
+    disagreement, v at x = 0.5: 0.02426 vs 0.02526; majority value used).
+  - `lgflow_validate_lid` reads the reference path from the new key `validation.reference`
+    (default: the Re = 100 file, so existing configs behave as before).
+  - New config `case_validate_re1000.cfg` (64x64, upwind, nu = 0.001) with thresholds
+    u L2 < 0.15, v L2 < 0.18, relative continuity < 1e-4. New CTest `GhiaRe1000`
+    (labels `slow;validation`) runs the executable and fails on a non-zero exit code.
+  - Mesh/scheme sweep (upwind): 32x32 u/v L2 0.172/0.212 (4402 it, 35 s); 64x64 0.103/0.124
+    (5111 it, 200 s); 128x128 0.063/0.070 (9616 it, 2371 s). Error ratio about 1.7 per
+    doubling: first-order upwind diffusion dominates at Re = 1000. Central differencing at
+    64x64 diverged (pressure residual 1e154 by iteration 3180; cell Peclet 16 > 2).
+- Files changed:
+  - `cases/lid_driven_cavity/ghia1982_re1000.csv`, `cases/lid_driven_cavity/case_validate_re1000.cfg`
+  - `src/validate/lid_driven_cavity_validate.cpp`, `tests/validation/CMakeLists.txt`, `README.md`
+- Validation:
+  - `cmake --build build --config Release`, then
+    `ctest --test-dir build -C Release -E PoiseuilleChannel`: 250/250 passed (1 skipped);
+    `GhiaRe1000` 171 s.
+  - `lgflow_validate_lid cases/lid_driven_cavity/case_validate.cfg 2000`: unchanged
+    (1376 iterations, u/v L2 0.0432/0.0221).
+- Risks/TODOs:
+  - Re = 1000 accuracy is limited by upwind convection; a bounded higher-order scheme
+    (deferred correction or blended upwind/central) is the next accuracy step.
